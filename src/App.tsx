@@ -5,12 +5,29 @@ import Automation from './components/Automation';
 import CallSimulator from './components/CallSimulator';
 import Analytics from './components/Analytics';
 import Settings from './components/Settings';
+import { downloadPythonBackend } from './utils/downloadZip';
 
 type Page = 'dashboard' | 'setup' | 'automation' | 'simulator' | 'analytics' | 'settings';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadSuccess, setDownloadSuccess] = useState(false);
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      await downloadPythonBackend();
+      setDownloadSuccess(true);
+      setTimeout(() => setDownloadSuccess(false), 3000);
+    } catch (error) {
+      console.error('Download failed:', error);
+      alert('Download failed. Please try again.');
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const navItems: { id: Page; label: string; icon: string }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line' },
@@ -66,7 +83,22 @@ function App() {
           ))}
         </nav>
 
-        <div className="p-3 border-t border-gray-800">
+        <div className="p-3 border-t border-gray-800 space-y-2">
+          {/* Download Button */}
+          <button
+            onClick={handleDownload}
+            disabled={downloading}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-gradient-to-r from-violet-600 to-indigo-600 text-white hover:from-violet-700 hover:to-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <i className={`fa-solid ${downloading ? 'fa-spinner fa-spin' : downloadSuccess ? 'fa-check' : 'fa-download'} w-5 text-center`}></i>
+            {sidebarOpen && (
+              <span>
+                {downloading ? 'Creating ZIP...' : downloadSuccess ? 'Downloaded!' : 'Download Backend'}
+              </span>
+            )}
+          </button>
+          
+          {/* Collapse Button */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-all"

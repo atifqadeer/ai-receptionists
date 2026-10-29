@@ -1,7 +1,23 @@
 import { useState } from 'react';
+import { downloadPythonBackend } from '../utils/downloadZip';
 
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState('today');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadSuccess, setDownloadSuccess] = useState(false);
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      await downloadPythonBackend();
+      setDownloadSuccess(true);
+      setTimeout(() => setDownloadSuccess(false), 3000);
+    } catch (error) {
+      console.error('Download failed:', error);
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const stats = [
     { label: 'Total Calls', value: '1,247', change: '+12.5%', icon: 'fa-phone', color: 'from-violet-500 to-indigo-600' },
@@ -30,6 +46,46 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* Download Section */}
+      <div className="bg-gradient-to-r from-violet-600/20 to-indigo-600/20 rounded-xl border border-violet-500/30 p-6">
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center flex-shrink-0">
+              <i className="fa-solid fa-download text-white text-xl"></i>
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-white mb-1">Download Python Backend</h3>
+              <p className="text-sm text-gray-300">
+                Get the complete Python backend code as a ZIP file. Includes FastAPI server, AI agent, call management, and all setup scripts.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-2">
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300">Python 3.9+</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300">FastAPI</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300">OpenAI</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300">Twilio</span>
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={handleDownload}
+            disabled={downloading}
+            className="px-6 py-3 rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-medium hover:from-violet-700 hover:to-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+          >
+            <i className={`fa-solid ${downloading ? 'fa-spinner fa-spin' : downloadSuccess ? 'fa-check' : 'fa-file-zipper'}`}></i>
+            {downloading ? 'Creating ZIP...' : downloadSuccess ? 'Downloaded!' : 'Download ZIP'}
+          </button>
+        </div>
+        
+        {downloadSuccess && (
+          <div className="mt-4 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
+            <p className="text-sm text-emerald-300 flex items-center gap-2">
+              <i className="fa-solid fa-circle-check"></i>
+              ZIP file downloaded! Extract it and follow the instructions in QUICKSTART.md
+            </p>
+          </div>
+        )}
+      </div>
+
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {stats.map((stat, idx) => (

@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download AI Receptionist Backend</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0f0f23 100%);
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+        }
+        .card {
+            background: rgba(17, 24, 39, 0.8);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            border-radius: 16px;
+            padding: 40px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .icon-wrapper {
+            width: 80px;
+            height: 80px;
+            border-radius: 20px;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            box-shadow: 0 10px 30px rgba(139, 92, 246, 0.3);
+        }
+        .icon-wrapper i {
+            font-size: 36px;
+            color: white;
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #c4b5fd, #a5b4fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle {
+            color: #94a3b8;
+            font-size: 16px;
+        }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin: 32px 0;
+        }
+        .feature {
+            background: rgba(31, 41, 55, 0.5);
+            border: 1px solid rgba(75, 85, 99, 0.3);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+        }
+        .feature i {
+            font-size: 24px;
+            color: #8b5cf6;
+            margin-bottom: 8px;
+        }
+        .feature h3 {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .feature p {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+        .download-btn {
+            display: block;
+            width: 100%;
+            padding: 18px 32px;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 10px 30px rgba(139, 92, 246, 0.3);
+        }
+        .download-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 40px rgba(139, 92, 246, 0.4);
+        }
+        .download-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .download-btn i {
+            margin-right: 8px;
+        }
+        .success-msg {
+            margin-top: 16px;
+            padding: 12px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 8px;
+            color: #6ee7b7;
+            text-align: center;
+            display: none;
+        }
+        .success-msg.show {
+            display: block;
+            animation: fadeIn 0.3s;
+        }
+        .instructions {
+            margin-top: 32px;
+            padding: 20px;
+            background: rgba(31, 41, 55, 0.3);
+            border: 1px solid rgba(75, 85, 99, 0.3);
+            border-radius: 12px;
+        }
+        .instructions h3 {
+            font-size: 16px;
+            margin-bottom: 12px;
+            color: #c4b5fd;
+        }
+        .instructions ol {
+            padding-left: 20px;
+            color: #94a3b8;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+        .instructions code {
+            background: rgba(139, 92, 246, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #c4b5fd;
+        }
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 24px;
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .back-link:hover {
+            color: #c4b5fd;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .fa-spin {
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <div class="header">
+                <div class="icon-wrapper">
+                    <i class="fa-solid fa-robot"></i>
+                </div>
+                <h1>AI Receptionist Backend</h1>
+                <p class="subtitle">Complete Python backend with FastAPI, AI Agent, and Automation</p>
+            </div>
+
+            <div class="features">
+                <div class="feature">
+                    <i class="fa-solid fa-brain"></i>
+                    <h3>AI Agent</h3>
+                    <p>OpenAI-powered conversation</p>
+                </div>
+                <div class="feature">
+                    <i class="fa-solid fa-phone"></i>
+                    <h3>Call Management</h3>
+                    <p>Twilio integration</p>
+                </div>
+                <div class="feature">
+                    <i class="fa-solid fa-gears"></i>
+                    <h3>Automation</h3>
+                    <p>Rules & workflows</p>
+                </div>
+                <div class="feature">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <h3>Analytics</h3>
+                    <p>Real-time insights</p>
+                </div>
+            </div>
+
+            <button class="download-btn" id="downloadBtn" onclick="downloadZip()">
+                <i class="fa-solid fa-file-zipper"></i>
+                Download Python Backend (ZIP)
+            </button>
+
+            <div class="success-msg" id="successMsg">
+                <i class="fa-solid fa-circle-check"></i>
+                Download complete! Extract the ZIP and follow QUICKSTART.md
+            </div>
+
+            <div class="instructions">
+                <h3><i class="fa-solid fa-list-check"></i> Quick Setup</h3>
+                <ol>
+                    <li>Extract the downloaded ZIP file</li>
+                    <li>Open terminal in the extracted folder</li>
+                    <li>Run: <code>python -m venv venv</code></li>
+                    <li>Activate: <code>source venv/bin/activate</code> (Linux/Mac) or <code>venv\Scripts\activate</code> (Windows)</li>
+                    <li>Install: <code>pip install -r requirements.txt</code></li>
+                    <li>Configure: <code>cp .env.example .env</code> and add your OpenAI API key</li>
+                    <li>Start: <code>python main.py</code></li>
+                    <li>Open: <code>http://localhost:8000/docs</code></li>
+                </ol>
+            </div>
+        </div>
+
+        <a href="/" class="back-link">
+            <i class="fa-solid fa-arrow-left"></i> Back to Dashboard
+        </a>
+    </div>
+
+    <script>
+    // All Python files embedded
+    const pythonFiles = {
+        'main.py': `"""
+AI Receptionist Hub - Main Application
+"""
+import os
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
+from app.core.config import settings
+from app.core.database import init_db
+from app.api.routes import agent_router, automation_router, calls_router, analytics_router, settings_router, webhooks_router, websocket_router
+from app.services.ai_agent import AIAgent
+from app.services.call_manager import CallManager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Starting AI Receptionist Hub...")
+    await init_db()
+    app.state.ai_agent = AIAgent()
+    app.state.call_manager = CallManager()
+    yield
+    logger.info("🛑 Shutting down...")
+
+app = FastAPI(title=settings.APP_NAME, version="1.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(agent_router, prefix="/api/agent", tags=["Agent"])
+app.include_router(automation_router, prefix="/api/automation", tags=["Automation"])
+app.include_router(calls_router, prefix="/api/calls", tags=["Calls"])
+app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"])
+app.include_router(settings_router, prefix="/api/settings", tags=["Settings"])
+app.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
+app.include_router(websocket_router, prefix="/ws", tags=["WebSocket"])
+
+@app.get("/")
+async def root():
+    return {"status": "online", "service": settings.APP_NAME, "version": "1.0.0"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host=settings.APP_HOST, port=settings.APP_PORT, reload=settings.APP_DEBUG)
+`,
+        'requirements.txt': `fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+openai==1.12.0
+sqlalchemy==2.0.25
+aiosqlite==0.19.0
+httpx==0.26.0
+loguru==0.7.2
+websockets==12.0
+`,
+        '.env.example': `APP_NAME=AI Receptionist Hub
+APP_ENV=development
+APP_DEBUG=true
+APP_HOST=0.0.0.0
+APP_PORT=8000
+APP_SECRET_KEY=change-this-secret
+DATABASE_URL=sqlite:///./ai_receptionist.db
+OPENAI_API_KEY=sk-your-openai-api-key-here
+OPENAI_MODEL=gpt-4-turbo-preview
+OPENAI_TEMPERATURE=0.7
+OPENAI_MAX_TOKENS=500
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_PHONE_NUMBER=
+ELEVENLABS_API_KEY=
+DEEPGRAM_API_KEY=
+`,
+        '.gitignore': `__pycache__/
+*.py[cod]
+venv/
+.env
+*.db
+logs/
+data/
+credentials/
+`,
+        'README.md': `# AI Receptionist Hub - Python Backend
+
+## Quick Start
+\`\`\`bash
+python -m venv venv
+source venv/bin/activate  # Windows: venv\\Scripts\\activate
+pip install -r requirements.txt
+cp .env.example .env
+# Edit .env and add OPENAI_API_KEY
+python main.py
+\`\`\`
+
+Open http://localhost:8000/docs for API documentation.
+`,
+        'QUICKSTART.md': `# Quick Start Guide
+
+1. Install Python 3.9+
+2. Create venv: \`python -m venv venv\`
+3. Activate: \`source venv/bin/activate\` (Linux/Mac) or \`venv\\Scripts\\activate\` (Windows)
+4. Install deps: \`pip install -r requirements.txt\`
+5. Copy env: \`cp .env.example .env\`
+6. Edit .env: Add your OPENAI_API_KEY
+7. Start: \`python main.py\`
+8. Open: http://localhost:8000/docs
+`,
+        'app/__init__.py': `# AI Receptionist Hub`,
+        'app/core/__init__.py': `# Core module`,
+        'app/core/config.py': `"""Core Configuration"""
+import os
+from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Settings(BaseSettings):
+    APP_NAME: str = os.getenv("APP_NAME", "AI Receptionist Hub")
+    APP_ENV: str = os.getenv("APP_ENV", "development")
+    APP_DEBUG: bool = os.getenv("APP_DEBUG", "true").lower() == "true"
+    APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
+    APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_receptionist.db")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+    OPENAI_TEMPERATURE: float = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
+    OPENAI_MAX_TOKENS: int = int(os.getenv("OPENAI_MAX_TOKENS", "500"))
+    TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    TWILIO_PHONE_NUMBER: str = os.getenv("TWILIO_PHONE_NUMBER", "")
+    
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+`,
+        'app/core/database.py': `"""Database Setup"""
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+from app.core.config import settings
+
+engine = create_async_engine(settings.DATABASE_URL, echo=settings.APP_DEBUG)
+async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+class Base(DeclarativeBase):
+    pass
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+async def get_db():
+    async with async_session() as session:
+        yield session
+`,
+        'app/models/__init__.py': `# Models`,
+        'app/models/schemas.py': `"""Pydantic schemas"""
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+from enum import Enum
+
+class CallStatus(str, Enum):
+    ACTIVE = "active"
+    ON_HOLD = "on_hold"
+    ENDED = "ended"
+
+class AgentConfig(BaseModel):
+    agent_name: str = "Aria"
+    company_name: str = "TechCorp Solutions"
+    language: str = "English"
+    voice: str = "female-1"
+    greeting: str = "Hello! How can I help you today?"
+    farewell: str = "Thank you for calling!"
+    personality: str = "professional"
+    knowledge_base: Dict[str, str] = {}
+    faqs: List[Dict[str, str]] = []
+
+class AgentResponse(BaseModel):
+    message: str
+    intent: str = "other"
+    confidence: float = 0.0
+    call_id: str
+    timestamp: str
+    requires_action: bool = False
+    action_data: Dict[str, Any] = {}
+
+class CallContext(BaseModel):
+    call_id: str
+    caller_number: Optional[str] = None
+    caller_name: Optional[str] = None
+    status: CallStatus = CallStatus.ACTIVE
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+
+class CallLog(BaseModel):
+    id: str
+    caller: str
+    number: str
+    time: str
+    duration: str
+    status: str
+    intent: str
+    satisfaction: int = 0
+
+class AutomationRule(BaseModel):
+    id: int
+    name: str
+    trigger: str
+    action: str
+    enabled: bool = True
+    priority: int = 1
+`,
+        'app/services/__init__.py': `# Services`,
+        'app/services/ai_agent.py': `"""AI Agent Service"""
+from typing import Dict, Optional
+from datetime import datetime
+from loguru import logger
+from openai import AsyncOpenAI
+from app.core.config import settings
+from app.models.schemas import AgentConfig, AgentResponse
+
+class AIAgent:
+    def __init__(self):
+        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self.config = AgentConfig(
+            agent_name="Aria",
+            company_name="TechCorp Solutions",
+            greeting="Hello! Thank you for calling TechCorp Solutions. I'm Aria. How can I help you today?",
+            farewell="Thank you for calling! Have a wonderful day.",
+            knowledge_base={"business_hours": "Mon-Fri 9AM-6PM EST", "phone": "+1 (555) 123-4567"}
+        )
+        self.history: Dict[str, list] = {}
+
+    def _build_system_prompt(self):
+        return f"""You are {self.config.agent_name}, AI receptionist for {self.config.company_name}.
+Be professional, helpful, and concise. Help with appointments, inquiries, and route complex issues.
+Business info: {self.config.knowledge_base}"""
+
+    async def process_message(self, call_id: str, message: str) -> AgentResponse:
+        if call_id not in self.history:
+            self.history[call_id] = [{"role": "system", "content": self._build_system_prompt()}]
+        self.history[call_id].append({"role": "user", "content": message})
+        try:
+            response = await self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=self.history[call_id],
+                temperature=settings.OPENAI_TEMPERATURE,
+                max_tokens=settings.OPENAI_MAX_TOKENS
+            )
+            reply = response.choices[0].message.content
+            self.history[call_id].append({"role": "assistant", "content": reply})
+            return AgentResponse(message=reply, intent="general_inquiry", confidence=0.95, call_id=call_id, timestamp=datetime.utcnow().isoformat())
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            return AgentResponse(message="I'm sorry, let me connect you with someone.", intent="error", call_id=call_id, timestamp=datetime.utcnow().isoformat(), requires_action=True)
+
+    def end_call(self, call_id: str):
+        self.history.pop(call_id, None)
+
+    def get_config(self):
+        return self.config
+
+    def update_config(self, data: dict):
+        for k, v in data.items():
+            if hasattr(self.config, k):
+                setattr(self.config, k, v)
+        return self.config
+`,
+        'app/services/call_manager.py': `"""Call Manager Service"""
+import uuid
+from datetime import datetime
+from typing import Dict, List, Optional
+from loguru import logger
+from app.models.schemas import CallContext, CallStatus, CallLog
+
+class CallManager:
+    def __init__(self):
+        self.active_calls: Dict[str, CallContext] = {}
+        self.call_history: List[CallLog] = []
+
+    async def start_call(self, caller_number: str = None, caller_name: str = None) -> CallContext:
+        call_id = str(uuid.uuid4())
+        call = CallContext(call_id=call_id, caller_number=caller_number, caller_name=caller_name)
+        self.active_calls[call_id] = call
+        logger.info(f"Call started: {call_id}")
+        return call
+
+    async def end_call(self, call_id: str) -> Optional[CallLog]:
+        if call_id not in self.active_calls:
+            return None
+        call = self.active_calls.pop(call_id)
+        duration = (datetime.utcnow() - call.started_at).total_seconds()
+        log = CallLog(id=call_id[:8].upper(), caller=call.caller_name or "Unknown", number=call.caller_number or "Unknown", time=call.started_at.strftime("%Y-%m-%d %H:%M"), duration=f"{int(duration//60)}:{int(duration%60):02d}", status="resolved", intent="general")
+        self.call_history.insert(0, log)
+        return log
+
+    async def get_active_calls(self):
+        return list(self.active_calls.values())
+
+    async def get_call_history(self, limit=50):
+        return self.call_history[:limit]
+
+    async def get_call_stats(self):
+        total = len(self.call_history)
+        resolved = len([c for c in self.call_history if c.status == "resolved"])
+        return {"total_calls": total + len(self.active_calls), "active_calls": len(self.active_calls), "resolved": resolved, "resolution_rate": (resolved/total*100) if total > 0 else 0}
+`,
+        'app/api/__init__.py': `# API`,
+        'app/api/routes.py': `"""API Routes"""
+import uuid
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request
+from app.models.schemas import AutomationRule
+
+agent_router = APIRouter()
+
+@agent_router.get("/config")
+async def get_config(request: Request):
+    return request.app.state.ai_agent.get_config()
+
+@agent_router.put("/config")
+async def update_config(request: Request, config: dict):
+    return request.app.state.ai_agent.update_config(config)
+
+@agent_router.post("/chat")
+async def chat(request: Request, data: dict):
+    call_id = data.get("call_id", str(uuid.uuid4()))
+    message = data.get("message", "")
+    if not message:
+        raise HTTPException(400, "Message required")
+    return await request.app.state.ai_agent.process_message(call_id, message)
+
+@agent_router.post("/call/start")
+async def start_call(request: Request, data: dict = None):
+    data = data or {}
+    call = await request.app.state.call_manager.start_call(data.get("caller_number"), data.get("caller_name"))
+    return {"call_id": call.call_id, "greeting": request.app.state.ai_agent.get_config().greeting}
+
+@agent_router.post("/call/{call_id}/end")
+async def end_call(request: Request, call_id: str):
+    log = await request.app.state.call_manager.end_call(call_id)
+    request.app.state.ai_agent.end_call(call_id)
+    return {"status": "ended", "farewell": request.app.state.ai_agent.get_config().farewell}
+
+automation_router = APIRouter()
+_rules = [AutomationRule(id=1, name="After Hours", trigger="Outside hours", action="Play message", enabled=True, priority=1)]
+
+@automation_router.get("/rules")
+async def get_rules():
+    return _rules
+
+@automation_router.post("/rules")
+async def create_rule(rule: dict):
+    new = AutomationRule(id=len(_rules)+1, name=rule.get("name",""), trigger=rule.get("trigger",""), action=rule.get("action",""), enabled=True, priority=len(_rules)+1)
+    _rules.append(new)
+    return new
+
+calls_router = APIRouter()
+
+@calls_router.get("/active")
+async def active(request: Request):
+    return await request.app.state.call_manager.get_active_calls()
+
+@calls_router.get("/history")
+async def history(request: Request, limit: int = 50):
+    return await request.app.state.call_manager.get_call_history(limit)
+
+@calls_router.get("/stats")
+async def stats(request: Request):
+    return await request.app.state.call_manager.get_call_stats()
+
+analytics_router = APIRouter()
+
+@analytics_router.get("/dashboard")
+async def dashboard(request: Request):
+    stats = await request.app.state.call_manager.get_call_stats()
+    return {"total_calls": stats.get("total_calls", 1247), "satisfaction_rate": 94.7}
+
+settings_router = APIRouter()
+
+@settings_router.get("/general")
+async def general():
+    return {"system_name": "AI Receptionist Hub", "timezone": "America/New_York"}
+
+@settings_router.get("/team")
+async def team():
+    return [{"id": 1, "name": "Admin", "role": "Admin", "email": "admin@example.com", "status": "active"}]
+
+webhooks_router = APIRouter()
+
+@webhooks_router.post("/twilio")
+async def twilio(request: Request):
+    from fastapi.responses import Response
+    return Response(content='<?xml version="1.0"?><Response><Say>Hello!</Say></Response>', media_type="application/xml")
+
+websocket_router = APIRouter()
+
+@websocket_router.websocket("/call/{call_id}")
+async def ws(websocket: WebSocket, call_id: str):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "text":
+                resp = await websocket.app.state.ai_agent.process_message(call_id, data.get("data",{}).get("message",""))
+                await websocket.send_json({"type": "response", "data": {"message": resp.message, "intent": resp.intent}})
+    except WebSocketDisconnect:
+        pass
+`,
+    };
+
+    async function downloadZip() {
+        const btn = document.getElementById('downloadBtn');
+        const msg = document.getElementById('successMsg');
+        
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Creating ZIP...';
+        
+        try {
+            const zip = new JSZip();
+            const folder = zip.folder('ai-receptionist-python-backend');
+            
+            for (const [filename, content] of Object.entries(pythonFiles)) {
+                folder.file(filename, content);
+            }
+            
+            const blob = await zip.generateAsync({ type: 'blob' });
+            saveAs(blob, 'ai-receptionist-python-backend.zip');
+            
+            btn.innerHTML = '<i class="fa-solid fa-check"></i> Downloaded!';
+            msg.classList.add('show');
+            
+            setTimeout(() => {
+                btn.innerHTML = '<i class="fa-solid fa-file-zipper"></i> Download Python Backend (ZIP)';
+                btn.disabled = false;
+            }, 3000);
+        } catch (error) {
+            console.error('Download failed:', error);
+            btn.innerHTML = '<i class="fa-solid fa-exclamation-triangle"></i> Failed - Try Again';
+            btn.disabled = false;
+        }
+    }
+    </script>
+</body>
+</html>
