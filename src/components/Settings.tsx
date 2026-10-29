@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import ApiKeysGuide from './ApiKeysGuide';
 
 export default function Settings() {
   const [activeSection, setActiveSection] = useState('general');
@@ -385,8 +386,12 @@ export default function Settings() {
 
           {/* API Keys */}
           {activeSection === 'api' && (
-            <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-5">
-              <h3 className="text-lg font-semibold text-white">API Keys & Webhooks</h3>
+            <div className="space-y-6">
+              {/* API Keys Guide */}
+              <ApiKeysGuide />
+
+              <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-5">
+              <h3 className="text-lg font-semibold text-white">Your API Keys</h3>
               <div className="space-y-4">
                 {[
                   { name: 'Production API Key', key: 'pk_live_••••••••••••••••••••', created: '2024-01-01', status: 'active' },
@@ -415,6 +420,7 @@ export default function Settings() {
                 <i className="fa-solid fa-plus"></i>
                 Generate New API Key
               </button>
+            </div>
             </div>
           )}
 
