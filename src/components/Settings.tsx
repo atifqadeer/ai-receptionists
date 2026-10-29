@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import ApiKeysGuide from './ApiKeysGuide';
+import Integrations from './Integrations';
 
 export default function Settings() {
-  const [activeSection, setActiveSection] = useState('general');
+  const [activeSection, setActiveSection] = useState('integrations');
   const [saved, setSaved] = useState(false);
 
   const [general, setGeneral] = useState({
@@ -50,10 +51,11 @@ export default function Settings() {
 
   const sections = [
     { id: 'general', label: 'General', icon: 'fa-cog' },
+    { id: 'integrations', label: 'Integrations', icon: 'fa-plug' },
     { id: 'telephony', label: 'Telephony', icon: 'fa-phone-volume' },
     { id: 'ai', label: 'AI Model', icon: 'fa-brain' },
     { id: 'team', label: 'Team', icon: 'fa-users' },
-    { id: 'api', label: 'API Keys', icon: 'fa-key' },
+    { id: 'api', label: 'API Keys Guide', icon: 'fa-key' },
   ];
 
   return (
@@ -152,6 +154,11 @@ export default function Settings() {
                 ))}
               </div>
             </div>
+          )}
+
+          {/* Integrations Settings */}
+          {activeSection === 'integrations' && (
+            <Integrations />
           )}
 
           {/* Telephony Settings */}
