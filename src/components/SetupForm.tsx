@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import VoicePreview from './VoicePreview';
 
 export default function SetupForm() {
   const [activeTab, setActiveTab] = useState('identity');
@@ -126,20 +127,6 @@ export default function SetupForm() {
               Voice Settings
             </h3>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Voice Profile</label>
-              <select
-                value={identity.voice}
-                onChange={(e) => setIdentity({ ...identity, voice: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none"
-              >
-                <option value="female-1">Female - Professional (Aria)</option>
-                <option value="female-2">Female - Friendly (Luna)</option>
-                <option value="male-1">Male - Professional (James)</option>
-                <option value="male-2">Male - Warm (Marcus)</option>
-                <option value="neutral">Neutral - Modern (Sage)</option>
-              </select>
-            </div>
-            <div>
               <label className="block text-sm font-medium text-gray-300 mb-1.5">
                 Speaking Rate: {identity.speakingRate}x
               </label>
@@ -177,10 +164,14 @@ export default function SetupForm() {
                 <span>High</span>
               </div>
             </div>
-            <button className="w-full py-2 rounded-lg border border-gray-700 text-sm text-gray-300 hover:bg-gray-800 transition-all flex items-center justify-center gap-2">
-              <i className="fa-solid fa-play text-violet-400"></i>
-              Preview Voice
-            </button>
+            
+            {/* Voice Preview Component */}
+            <VoicePreview 
+              selectedVoice={identity.voice}
+              speakingRate={identity.speakingRate}
+              pitch={identity.pitch}
+              onSelectVoice={(voiceId) => setIdentity({ ...identity, voice: voiceId })}
+            />
           </div>
         </div>
       )}
