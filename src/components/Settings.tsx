@@ -158,7 +158,9 @@ export default function Settings() {
 
           {/* Integrations Settings */}
           {activeSection === 'integrations' && (
-            <Integrations />
+            <div className="space-y-6">
+              <Integrations />
+            </div>
           )}
 
           {/* Telephony Settings */}
