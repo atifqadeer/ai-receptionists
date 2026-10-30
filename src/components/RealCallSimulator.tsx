@@ -60,6 +60,7 @@ export default function RealCallSimulator() {
     phone: '+1 (555) 123-4567',
     email: 'support@techcorp.com',
     services: 'Web Development, Mobile Apps, Cloud Solutions',
+    faqs: [] as Array<{ q: string; a: string }>,
   });
 
   // Check browser support
@@ -95,7 +96,7 @@ export default function RealCallSimulator() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Initialize speech recognition
+  // Initialize speech recognition with continuous listening
   const initRecognition = () => {
     if (!speechRecognitionSupported) {
       setError('Speech recognition not supported in this browser. Please use Chrome or Edge.');
@@ -105,7 +106,8 @@ export default function RealCallSimulator() {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
     
-    recognition.continuous = false;
+    // Enable continuous listening for automatic voice detection
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
@@ -128,6 +130,13 @@ export default function RealCallSimulator() {
       }
       
       setInterimTranscript(interim);
+      
+      // Barge-in: If user starts speaking while agent is speaking, stop the agent
+      if (final && isSpeaking) {
+        window.speechSynthesis.cancel();
+        setIsSpeaking(false);
+      }
+      
       if (final) {
         setTranscript(final);
         handleCallerSpeech(final);
@@ -136,18 +145,34 @@ export default function RealCallSimulator() {
 
     recognition.onerror = (event: any) => {
       console.error('Speech recognition error:', event.error);
-      setIsListening(false);
       if (event.error === 'not-allowed') {
         setError('Microphone access denied. Please allow microphone access.');
+        setIsListening(false);
       } else if (event.error === 'no-speech') {
-        // No speech detected, not a critical error
-      } else {
+        // No speech detected, restart listening automatically
+        if (callStatus === 'active' && !isSpeaking) {
+          try {
+            recognition.start();
+          } catch (e) {
+            // Already started
+          }
+        }
+      } else if (event.error !== 'aborted') {
         setError(`Speech recognition error: ${event.error}`);
       }
     };
 
     recognition.onend = () => {
-      setIsListening(false);
+      // Automatically restart listening if call is still active and agent is not speaking
+      if (callStatus === 'active' && !isSpeaking) {
+        try {
+          recognition.start();
+        } catch (e) {
+          // Already started
+        }
+      } else {
+        setIsListening(false);
+      }
       setInterimTranscript('');
     };
 
@@ -224,13 +249,45 @@ export default function RealCallSimulator() {
       utterance.rate = profile.rate * identity.speakingRate;
       utterance.pitch = profile.pitch * identity.pitch;
       
-      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onstart = () => {
+        setIsSpeaking(true);
+        // Pause recognition while agent is speaking
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.stop();
+          } catch (e) {
+            // Ignore errors
+          }
+        }
+      };
+      
       utterance.onend = () => {
         setIsSpeaking(false);
+        // Restart listening after agent finishes speaking
+        if (callStatus === 'active' && recognitionRef.current) {
+          setTimeout(() => {
+            try {
+              recognitionRef.current.start();
+            } catch (e) {
+              // Already started
+            }
+          }, 300);
+        }
         resolve();
       };
+      
       utterance.onerror = () => {
         setIsSpeaking(false);
+        // Restart listening even on error
+        if (callStatus === 'active' && recognitionRef.current) {
+          setTimeout(() => {
+            try {
+              recognitionRef.current.start();
+            } catch (e) {
+              // Already started
+            }
+          }, 300);
+        }
         resolve();
       };
       
@@ -242,29 +299,107 @@ export default function RealCallSimulator() {
   // Detect intent from caller's speech
   const detectIntent = (text: string): string => {
     const lower = text.toLowerCase();
-    if (lower.includes('appointment') || lower.includes('book') || lower.includes('schedule')) return 'Appointment Booking';
-    if (lower.includes('hours') || lower.includes('open') || lower.includes('time')) return 'Business Hours';
-    if (lower.includes('support') || lower.includes('technical') || lower.includes('bug')) return 'Technical Support';
-    if (lower.includes('manager') || lower.includes('speak') || lower.includes('human')) return 'Transfer Request';
-    if (lower.includes('service') || lower.includes('offer')) return 'General Inquiry';
-    if (lower.includes('complaint') || lower.includes('unhappy')) return 'Complaint';
-    if (lower.includes('price') || lower.includes('cost')) return 'Pricing';
+    
+    // Check FAQs first for direct matches
+    if (knowledge.faqs && knowledge.faqs.length > 0) {
+      for (const faq of knowledge.faqs) {
+        const faqLower = faq.q.toLowerCase();
+        const words = faqLower.split(/\s+/).filter(w => w.length > 3);
+        const matchCount = words.filter(w => lower.includes(w)).length;
+        if (matchCount >= Math.min(2, words.length)) {
+          return `FAQ:${faq.q}`;
+        }
+      }
+    }
+    
+    // Intent detection
+    if (lower.includes('appointment') || lower.includes('book') || lower.includes('schedule') || lower.includes('meeting')) return 'Appointment Booking';
+    if (lower.includes('hours') || lower.includes('open') || lower.includes('close') || lower.includes('when')) return 'Business Hours';
+    if (lower.includes('support') || lower.includes('technical') || lower.includes('bug') || lower.includes('error') || lower.includes('problem') || lower.includes('issue') || lower.includes('broken') || lower.includes('not working')) return 'Technical Support';
+    if (lower.includes('manager') || lower.includes('speak') || lower.includes('human') || lower.includes('person') || lower.includes('agent') || lower.includes('representative') || lower.includes('transfer')) return 'Transfer Request';
+    if (lower.includes('service') || lower.includes('offer') || lower.includes('provide') || lower.includes('do you')) return 'General Inquiry';
+    if (lower.includes('complaint') || lower.includes('unhappy') || lower.includes('angry') || lower.includes('frustrated') || lower.includes('dissatisfied')) return 'Complaint';
+    if (lower.includes('price') || lower.includes('cost') || lower.includes('how much') || lower.includes('pricing') || lower.includes('charge') || lower.includes('fee') || lower.includes('rate')) return 'Pricing';
+    if (lower.includes('address') || lower.includes('location') || lower.includes('where') || lower.includes('find you') || lower.includes('office')) return 'Location';
+    if (lower.includes('email') || lower.includes('contact') || lower.includes('reach') || lower.includes('phone') || lower.includes('call')) return 'Contact Info';
+    if (lower.includes('hello') || lower.includes('hi') || lower.includes('hey') || lower.includes('good morning') || lower.includes('good afternoon')) return 'Greeting';
+    if (lower.includes('thank') || lower.includes('thanks') || lower.includes('bye') || lower.includes('goodbye')) return 'Closing';
+    
     return 'General Inquiry';
   };
 
-  // Generate AI response based on intent
+  // Generate AI response based on intent - uses knowledge base data
   const generateResponse = (text: string, intent: string): string => {
-    const responses: Record<string, string> = {
-      'Appointment Booking': `I'd be happy to help you book an appointment! We're available Monday through Friday, 9 AM to 6 PM. What date and time works best for you?`,
-      'Business Hours': `Our business hours are ${knowledge.businessHours}. Is there anything else I can help you with?`,
-      'Technical Support': `I understand you need technical support. Could you describe the problem you're experiencing? If it's urgent, I can transfer you to our technical team.`,
-      'Transfer Request': `I'd be happy to connect you with a specialist. Let me check their availability. Would you like me to transfer you now?`,
-      'General Inquiry': `Thank you for your question. We offer ${knowledge.services}. You can also reach us at ${knowledge.email}. Is there anything specific you'd like to know?`,
-      'Complaint': `I'm sorry to hear you're having an issue. I want to make sure this gets addressed properly. Could you tell me more about what happened?`,
-      'Pricing': `Our pricing varies based on your needs. We offer web development, mobile apps, cloud solutions, and AI integration. Would you like me to connect you with our sales team for a detailed quote?`,
+    // Handle FAQ matches
+    if (intent.startsWith('FAQ:')) {
+      const question = intent.substring(4);
+      const faq = knowledge.faqs?.find(f => f.q === question);
+      if (faq) {
+        return faq.a;
+      }
+    }
+    
+    // Dynamic responses using knowledge base
+    const responses: Record<string, string[]> = {
+      'Appointment Booking': [
+        `I'd be happy to help you book an appointment! We're available ${knowledge.businessHours}. What date and time works best for you?`,
+        `Great! I can schedule that for you. Our available hours are ${knowledge.businessHours}. When would you like to come in?`,
+        `Absolutely! We can set up an appointment. We're open ${knowledge.businessHours}. What day and time would you prefer?`,
+      ],
+      'Business Hours': [
+        `Our business hours are ${knowledge.businessHours}. Is there anything else I can help you with?`,
+        `We're open ${knowledge.businessHours}. Would you like to schedule a visit or do you have other questions?`,
+        `You can reach us ${knowledge.businessHours}. Is there something specific I can assist you with today?`,
+      ],
+      'Technical Support': [
+        `I understand you're experiencing technical difficulties. Could you describe the problem in more detail? If it's urgent, I can transfer you to our technical team right away.`,
+        `I'm sorry to hear you're having technical issues. Let me help you troubleshoot. Can you tell me exactly what's happening?`,
+        `I'd be happy to help with the technical problem. Could you walk me through what you're experiencing? We can also connect you with a specialist if needed.`,
+      ],
+      'Transfer Request': [
+        `I'd be happy to connect you with a specialist. Let me check their availability. Would you like me to transfer you now, or would you prefer to schedule a specific time?`,
+        `Of course! I can transfer you to the right person. Are you available now, or would you prefer to schedule a callback?`,
+        `Absolutely! Let me get you connected with someone who can help. Would you like to be transferred now?`,
+      ],
+      'General Inquiry': [
+        `Thank you for your question! We offer ${knowledge.services}. You can reach us at ${knowledge.email} or call us at ${knowledge.phone}. Is there anything specific you'd like to know?`,
+        `Great question! Our services include ${knowledge.services}. For more information, you can email us at ${knowledge.email}. What else can I help you with?`,
+        `I'd be happy to help! We provide ${knowledge.services}. Feel free to contact us at ${knowledge.email} for more details. What else would you like to know?`,
+      ],
+      'Complaint': [
+        `I'm sincerely sorry to hear you're having this experience. Your feedback is important to us. Could you tell me more about what happened so I can make sure it gets addressed properly?`,
+        `I apologize for the inconvenience. We take all concerns seriously. Could you share more details about the issue? I want to make sure we resolve this for you.`,
+        `I'm sorry you're frustrated. We want to make this right. Can you tell me what went wrong so I can escalate this to the right team?`,
+      ],
+      'Pricing': [
+        `Our pricing varies based on your specific needs. We offer ${knowledge.services}. Would you like me to connect you with our sales team for a detailed quote? You can reach them at ${knowledge.email}.`,
+        `We have different pricing tiers depending on the services you need. We provide ${knowledge.services}. For a personalized quote, I can connect you with our sales team. Would you like that?`,
+        `Pricing depends on your requirements. Our services include ${knowledge.services}. For accurate pricing, our sales team can provide a custom quote. Would you like me to arrange that?`,
+      ],
+      'Location': [
+        `You can find us at our main office. For the exact address and directions, please contact us at ${knowledge.email} or call ${knowledge.phone}. Would you like me to transfer you to someone who can provide detailed location information?`,
+        `Our office is conveniently located. For specific address details and parking information, please reach out to us at ${knowledge.phone} or ${knowledge.email}.`,
+      ],
+      'Contact Info': [
+        `You can reach us in several ways: Phone: ${knowledge.phone}, Email: ${knowledge.email}. We're available ${knowledge.businessHours}. How would you prefer to be contacted?`,
+        `Our contact information is: Phone: ${knowledge.phone}, Email: ${knowledge.email}. We're here to help ${knowledge.businessHours}. Is there anything else I can assist you with?`,
+        `Feel free to contact us at ${knowledge.phone} or email us at ${knowledge.email}. Our team is available ${knowledge.businessHours}. What else can I help you with today?`,
+      ],
+      'Greeting': [
+        `Hello! It's great to speak with you. How can I assist you today?`,
+        `Hi there! Welcome. What can I help you with today?`,
+        `Hello! I'm here to help. What brings you in today?`,
+      ],
+      'Closing': [
+        `Thank you for calling! Have a wonderful day. Don't hesitate to reach out if you need anything else.`,
+        `You're welcome! It was my pleasure assisting you. Have a great day!`,
+        `Thank you! We appreciate your call. Feel free to contact us anytime. Goodbye!`,
+      ],
     };
     
-    return responses[intent] || `Thank you for that information. How can I best assist you with this?`;
+    const intentResponses = responses[intent] || responses['General Inquiry'];
+    // Pick a random response to add variety
+    return intentResponses[Math.floor(Math.random() * intentResponses.length)];
   };
 
   // Handle caller's speech
@@ -343,6 +478,11 @@ export default function RealCallSimulator() {
     // Initialize microphone for voice level
     await initMicrophone();
     
+    // Initialize speech recognition
+    if (!recognitionRef.current) {
+      recognitionRef.current = initRecognition();
+    }
+    
     // Simulate dialing
     await new Promise(resolve => setTimeout(resolve, 2000));
     
@@ -367,6 +507,17 @@ export default function RealCallSimulator() {
       text: behavior.greeting,
       timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     }]);
+    
+    // Automatically start listening after greeting
+    setTimeout(() => {
+      if (recognitionRef.current && callStatus === 'active') {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          // Already started
+        }
+      }
+    }, 500);
   };
 
   // End call
@@ -614,26 +765,31 @@ export default function RealCallSimulator() {
               <div className="p-4 border-b border-gray-800 bg-gradient-to-r from-violet-600/5 to-indigo-600/5">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${isListening ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500'}`}></div>
+                    <div className={`w-2 h-2 rounded-full ${
+                      isSpeaking ? 'bg-violet-400 animate-pulse' : 
+                      isListening ? 'bg-emerald-400 animate-pulse' : 
+                      'bg-gray-500'
+                    }`}></div>
                     <span className="text-xs text-gray-400">
-                      {isListening ? 'Listening...' : isSpeaking ? `${identity.agentName} speaking...` : 'Ready'}
+                      {isSpeaking ? `${identity.agentName} speaking...` : 
+                       isListening ? 'Listening...' : 
+                       'Automatic voice detection active'}
                     </span>
                   </div>
-                  {isListening && (
-                    <button
-                      onClick={stopListening}
-                      className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1"
-                    >
-                      <i className="fa-solid fa-stop"></i>
-                      Stop
-                    </button>
-                  )}
+                  <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <i className="fa-solid fa-microphone"></i>
+                    <span>Auto-listening enabled</span>
+                  </div>
                 </div>
                 
                 {/* Voice Level Bar */}
                 <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
                   <div 
-                    className="h-full bg-gradient-to-r from-violet-500 to-indigo-500 transition-all duration-100"
+                    className={`h-full transition-all duration-100 ${
+                      isSpeaking ? 'bg-gradient-to-r from-violet-500 to-purple-500' :
+                      isListening ? 'bg-gradient-to-r from-emerald-500 to-teal-500' :
+                      'bg-gradient-to-r from-gray-600 to-gray-700'
+                    }`}
                     style={{ width: `${voiceLevel}%` }}
                   ></div>
                 </div>
@@ -698,27 +854,43 @@ export default function RealCallSimulator() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Microphone Control */}
+            {/* Automatic Voice Detection Status */}
             {callStatus === 'active' && (
               <div className="p-4 border-t border-gray-800">
-                <button
-                  onClick={isListening ? stopListening : startListening}
-                  disabled={isSpeaking}
-                  className={`w-full py-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-3 ${
-                    isListening
-                      ? 'bg-red-500 hover:bg-red-600 text-white'
-                      : 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white'
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
-                >
-                  <i className={`fa-solid ${isListening ? 'fa-microphone-slash' : 'fa-microphone'} text-xl`}></i>
-                  <span className="text-lg">
-                    {isListening ? 'Stop Listening' : isSpeaking ? `${identity.agentName} is speaking...` : 'Hold to Speak'}
-                  </span>
-                </button>
+                <div className={`w-full py-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-3 ${
+                  isSpeaking
+                    ? 'bg-violet-600/20 border border-violet-500/30 text-violet-300'
+                    : isListening
+                    ? 'bg-emerald-600/20 border border-emerald-500/30 text-emerald-300'
+                    : 'bg-gray-800/50 border border-gray-700/50 text-gray-400'
+                }`}>
+                  {isSpeaking ? (
+                    <>
+                      <div className="flex gap-1">
+                        <div className="w-1 h-4 bg-violet-400 rounded animate-pulse" style={{ animationDelay: '0ms' }}></div>
+                        <div className="w-1 h-4 bg-violet-400 rounded animate-pulse" style={{ animationDelay: '150ms' }}></div>
+                        <div className="w-1 h-4 bg-violet-400 rounded animate-pulse" style={{ animationDelay: '300ms' }}></div>
+                      </div>
+                      <span className="text-lg">{identity.agentName} is speaking...</span>
+                    </>
+                  ) : isListening ? (
+                    <>
+                      <i className="fa-solid fa-microphone text-xl animate-pulse"></i>
+                      <span className="text-lg">🎤 Listening... Just speak naturally</span>
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-circle text-xl"></i>
+                      <span className="text-lg">Ready - Start speaking anytime</span>
+                    </>
+                  )}
+                </div>
                 <p className="text-xs text-gray-500 text-center mt-2">
-                  {isListening 
-                    ? '🎤 Speak now... AI will respond when you stop'
-                    : 'Click to start speaking to the AI agent'}
+                  {isSpeaking 
+                    ? '💡 You can interrupt by speaking - the agent will stop automatically'
+                    : isListening
+                    ? '💡 The AI will respond when you finish speaking'
+                    : '💡 Automatic voice detection is active - no buttons needed'}
                 </p>
               </div>
             )}
