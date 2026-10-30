@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import VoicePreview from './VoicePreview';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 export default function SetupForm() {
   const [activeTab, setActiveTab] = useState('identity');
   const [saved, setSaved] = useState(false);
 
-  const [identity, setIdentity] = useState({
+  // Use localStorage hook for persistence
+  const [identity, setIdentity] = useLocalStorage('agent-identity', {
     agentName: 'Aria',
     companyName: 'TechCorp Solutions',
     language: 'English',
@@ -14,7 +16,7 @@ export default function SetupForm() {
     pitch: 1.0,
   });
 
-  const [behavior, setBehavior] = useState({
+  const [behavior, setBehavior] = useLocalStorage('agent-behavior', {
     greeting: 'Hello! Thank you for calling TechCorp Solutions. I\'m Aria, your AI assistant. How can I help you today?',
     farewell: 'Thank you for calling! Have a wonderful day.',
     holdMessage: 'Thank you for your patience. I\'m looking into that for you right now.',
@@ -25,7 +27,7 @@ export default function SetupForm() {
     personality: 'professional',
   });
 
-  const [knowledge, setKnowledge] = useState({
+  const [knowledge, setKnowledge] = useLocalStorage('agent-knowledge', {
     businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
     address: '123 Innovation Drive, Suite 400, San Francisco, CA 94102',
     phone: '+1 (555) 123-4567',

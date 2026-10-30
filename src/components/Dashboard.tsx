@@ -1,12 +1,16 @@
 import { useState } from 'react';
 import { downloadPythonBackend } from '../utils/downloadZip';
 import DiagnosticTool from './DiagnosticTool';
+import { useClearStorage, useStorageExport } from '../hooks/useLocalStorage';
 
 export default function Dashboard() {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [timeRange, setTimeRange] = useState('today');
   const [downloading, setDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+  
+  const { clearAll } = useClearStorage();
+  const { downloadBackup } = useStorageExport();
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -248,10 +252,7 @@ export default function Dashboard() {
               </button>
               <span className="text-xs text-gray-600">•</span>
               <button
-                onClick={() => {
-                  localStorage.clear();
-                  window.location.reload();
-                }}
+                onClick={clearAll}
                 className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1"
               >
                 <i className="fa-solid fa-trash"></i>
@@ -260,6 +261,47 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Data Management */}
+      <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
+        <h3 className="font-semibold text-white mb-4 flex items-center gap-2">
+          <i className="fa-solid fa-database text-violet-400"></i>
+          Data Management
+        </h3>
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4 mb-4">
+          <p className="text-sm text-emerald-300 flex items-start gap-2">
+            <i className="fa-solid fa-circle-check mt-0.5"></i>
+            <span>
+              <strong>Auto-Save Enabled:</strong> All your changes are automatically saved to your browser's local storage. 
+              Your settings will persist even after closing the browser or refreshing the page.
+            </span>
+          </p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <button
+            onClick={downloadBackup}
+            className="px-4 py-3 rounded-lg bg-blue-600/10 border border-blue-500/30 text-blue-300 hover:bg-blue-600/20 transition-all flex items-center justify-center gap-2"
+          >
+            <i className="fa-solid fa-download"></i>
+            <span className="text-sm font-medium">Export Backup</span>
+          </button>
+          <button
+            onClick={() => {
+              if (window.confirm('Are you sure you want to reset all settings to default? This cannot be undone.')) {
+                clearAll();
+              }
+            }}
+            className="px-4 py-3 rounded-lg bg-red-600/10 border border-red-500/30 text-red-300 hover:bg-red-600/20 transition-all flex items-center justify-center gap-2"
+          >
+            <i className="fa-solid fa-rotate-left"></i>
+            <span className="text-sm font-medium">Reset to Default</span>
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mt-3">
+          <i className="fa-solid fa-info-circle mr-1"></i>
+          Export creates a JSON backup of all your settings. Reset removes all saved data and reloads with defaults.
+        </p>
       </div>
     </div>
   );

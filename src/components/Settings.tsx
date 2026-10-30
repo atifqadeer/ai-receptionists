@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import ApiKeysGuide from './ApiKeysGuide';
 import Integrations from './Integrations';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 export default function Settings() {
   const [activeSection, setActiveSection] = useState('integrations');
   const [saved, setSaved] = useState(false);
 
-  const [general, setGeneral] = useState({
+  // Use localStorage hook for persistence
+  const [general, setGeneral] = useLocalStorage('settings-general', {
     systemName: 'AI Receptionist Hub',
     timezone: 'America/New_York',
     dateFormat: 'MM/DD/YYYY',
@@ -16,7 +18,7 @@ export default function Settings() {
     autoSaveTranscripts: true,
   });
 
-  const [telephony, setTelephony] = useState({
+  const [telephony, setTelephony] = useLocalStorage('settings-telephony', {
     provider: 'twilio',
     // Common fields
     phoneNumber: '+1 (555) 123-4567',
@@ -81,7 +83,7 @@ export default function Settings() {
     sipTransport: 'udp',
   });
 
-  const [ai, setAi] = useState({
+  const [ai, setAi] = useLocalStorage('settings-ai', {
     provider: 'openai',
     model: 'gpt-4-turbo',
     apiKey: 'sk-••••••••••••••••••••••••',
@@ -92,7 +94,7 @@ export default function Settings() {
     enableMemory: true,
   });
 
-  const [team, setTeam] = useState([
+  const [team, setTeam] = useLocalStorage('settings-team', [
     { id: 1, name: 'Alex Thompson', role: 'Admin', email: 'alex@techcorp.com', status: 'active' },
     { id: 2, name: 'Maria Garcia', role: 'Manager', email: 'maria@techcorp.com', status: 'active' },
     { id: 3, name: 'James Wilson', role: 'Agent', email: 'james@techcorp.com', status: 'active' },

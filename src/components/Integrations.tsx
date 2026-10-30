@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 interface ServiceConfig {
   apiKey: string;
@@ -29,7 +30,9 @@ interface IntegrationsState {
 
 export default function Integrations() {
   const [saved, setSaved] = useState(false);
-  const [config, setConfig] = useState<IntegrationsState>({
+  
+  // Use localStorage hook for persistence
+  const [config, setConfig] = useLocalStorage<IntegrationsState>('integrations-config', {
     // AI Brain
     openai: { apiKey: '', enabled: true, model: 'gpt-4-turbo' },
     anthropic: { apiKey: '', enabled: false, model: 'claude-3-opus' },

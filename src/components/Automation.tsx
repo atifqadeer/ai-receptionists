@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 interface AutomationRule {
   id: number;
@@ -10,7 +11,8 @@ interface AutomationRule {
 }
 
 export default function Automation() {
-  const [rules, setRules] = useState<AutomationRule[]>([
+  // Use localStorage hook for persistence
+  const [rules, setRules] = useLocalStorage<AutomationRule[]>('automation-rules', [
     { id: 1, name: 'After Hours Routing', trigger: 'Call outside business hours', action: 'Play recorded message + offer callback', enabled: true, priority: 1 },
     { id: 2, name: 'Appointment Booking', trigger: 'Intent: Appointment', action: 'Collect date/time → Confirm → Send SMS', enabled: true, priority: 2 },
     { id: 3, name: 'Emergency Escalation', trigger: 'Keywords: emergency, urgent, help', action: 'Immediately transfer to on-call staff', enabled: true, priority: 0 },
@@ -19,7 +21,7 @@ export default function Automation() {
     { id: 6, name: 'Voicemail Fallback', trigger: 'No agent available after 30s', action: 'Offer voicemail + email notification', enabled: true, priority: 4 },
   ]);
 
-  const [workflows, setWorkflows] = useState([
+  const [workflows, setWorkflows] = useLocalStorage('automation-workflows', [
     { id: 1, name: 'New Customer Onboarding', steps: 5, status: 'active', calls: 234 },
     { id: 2, name: 'Appointment Reminder', steps: 3, status: 'active', calls: 567 },
     { id: 3, name: 'Payment Collection', steps: 4, status: 'paused', calls: 89 },
