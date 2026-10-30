@@ -3,11 +3,12 @@ import Dashboard from './components/Dashboard';
 import SetupForm from './components/SetupForm';
 import Automation from './components/Automation';
 import CallSimulator from './components/CallSimulator';
+import RealCallSimulator from './components/RealCallSimulator';
 import Analytics from './components/Analytics';
 import Settings from './components/Settings';
 import { downloadPythonBackend } from './utils/downloadZip';
 
-type Page = 'dashboard' | 'setup' | 'automation' | 'simulator' | 'analytics' | 'settings';
+type Page = 'dashboard' | 'setup' | 'automation' | 'simulator' | 'realcall' | 'analytics' | 'settings';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -33,7 +34,8 @@ function App() {
     { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line' },
     { id: 'setup', label: 'Agent Setup', icon: 'fa-robot' },
     { id: 'automation', label: 'Automation', icon: 'fa-gears' },
-    { id: 'simulator', label: 'Live Simulator', icon: 'fa-phone' },
+    { id: 'realcall', label: 'Make a Call', icon: 'fa-phone-volume' },
+    { id: 'simulator', label: 'Text Simulator', icon: 'fa-comments' },
     { id: 'analytics', label: 'Analytics', icon: 'fa-chart-bar' },
     { id: 'settings', label: 'Settings', icon: 'fa-sliders' },
   ];
@@ -43,6 +45,7 @@ function App() {
       case 'dashboard': return <Dashboard />;
       case 'setup': return <SetupForm />;
       case 'automation': return <Automation />;
+      case 'realcall': return <RealCallSimulator />;
       case 'simulator': return <CallSimulator />;
       case 'analytics': return <Analytics />;
       case 'settings': return <Settings />;
@@ -114,12 +117,17 @@ function App() {
         {/* Top Bar */}
         <header className="sticky top-0 z-10 bg-gray-950/80 backdrop-blur-xl border-b border-gray-800 px-6 py-4 flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold text-white capitalize">{currentPage === 'simulator' ? 'Live Call Simulator' : currentPage}</h2>
+            <h2 className="text-xl font-bold text-white capitalize">
+              {currentPage === 'simulator' ? 'Text Call Simulator' : 
+               currentPage === 'realcall' ? 'Make a Voice Call' : 
+               currentPage}
+            </h2>
             <p className="text-sm text-gray-400">
               {currentPage === 'dashboard' && 'Overview of your AI receptionist performance'}
               {currentPage === 'setup' && 'Configure your AI agent personality and behavior'}
               {currentPage === 'automation' && 'Set up call routing and automated workflows'}
-              {currentPage === 'simulator' && 'Test your AI agent with simulated conversations'}
+              {currentPage === 'realcall' && 'Speak to the AI agent using your microphone'}
+              {currentPage === 'simulator' && 'Test your AI agent with text-based conversations'}
               {currentPage === 'analytics' && 'View call history and performance metrics'}
               {currentPage === 'settings' && 'System configuration and integrations'}
             </p>
