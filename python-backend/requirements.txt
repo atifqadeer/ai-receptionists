@@ -1,0 +1,43 @@
+# ============================================
+# AI Receptionist Hub - Core Dependencies
+# ============================================
+# Install with: pip install -r requirements.txt
+
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# AI & LLM
+openai==1.12.0
+
+# Database
+sqlalchemy==2.0.25
+aiosqlite==0.19.0
+
+# HTTP Client
+httpx==0.26.0
+
+# Logging
+loguru==0.7.2
+
+# WebSockets
+websockets==12.0
+
+# Telephony (optional - uncomment if needed)
+# twilio==8.12.0
+
+# Voice (optional - uncomment if needed)
+# elevenlabs==0.2.27
+# deepgram-sdk==3.1.4
+
+# Task Queue (optional - uncomment if needed)
+# redis==5.0.1
+# celery==5.3.6
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
