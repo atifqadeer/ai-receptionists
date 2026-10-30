@@ -640,7 +640,7 @@ class AgentConfig(BaseModel):
     agent_name: str = "Aria"
     company_name: str = "TechCorp Solutions"
     language: str = "English"
-    voice: str = "female-1"
+    voice: str = "skylar"
     speaking_rate: float = 1.0
     pitch: float = 1.0
     greeting: str = "Hello! Thank you for calling. How can I help you today?"
@@ -727,7 +727,7 @@ class AIAgent:
             agent_name="Aria",
             company_name="TechCorp Solutions",
             language="English",
-            voice="female-1",
+            voice="skylar",
             greeting="Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?",
             farewell="Thank you for calling! Have a wonderful day.",
             personality="professional",

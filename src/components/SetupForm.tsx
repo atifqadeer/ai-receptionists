@@ -9,7 +9,7 @@ export default function SetupForm() {
     agentName: 'Aria',
     companyName: 'TechCorp Solutions',
     language: 'English',
-    voice: 'female-1',
+    voice: 'skylar',
     speakingRate: 1.0,
     pitch: 1.0,
   });

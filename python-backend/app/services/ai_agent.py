@@ -31,7 +31,7 @@ class AIAgent:
             agent_name="Aria",
             company_name="TechCorp Solutions",
             language="English",
-            voice="female-1",
+            voice="skylar",
             speaking_rate=1.0,
             pitch=1.0,
             greeting="Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?",

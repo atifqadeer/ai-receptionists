@@ -4,17 +4,100 @@ interface VoiceOption {
   id: string;
   label: string;
   description: string;
-  gender: 'female' | 'male' | 'neutral';
-  browserVoiceMatch: string[]; // Keywords to match browser voices
+  gender: 'female' | 'male';
+  elevenlabsId: string;
+  // Browser TTS tuning for differentiation
+  rate: number;
+  pitch: number;
+  sampleText: string;
+  accent: string;
+  tags: string[];
 }
 
 const VOICE_OPTIONS: VoiceOption[] = [
-  { id: 'female-1', label: 'Aria (Professional)', description: 'Clear, professional female voice', gender: 'female', browserVoiceMatch: ['female', 'woman', 'zira', 'samantha', 'google us english'] },
-  { id: 'female-2', label: 'Luna (Friendly)', description: 'Warm, friendly female voice', gender: 'female', browserVoiceMatch: ['female', 'woman', 'allison', 'karen', 'google uk english female'] },
-  { id: 'male-1', label: 'James (Professional)', description: 'Deep, authoritative male voice', gender: 'male', browserVoiceMatch: ['male', 'man', 'david', 'daniel', 'google uk english male'] },
-  { id: 'male-2', label: 'Marcus (Warm)', description: 'Friendly, approachable male voice', gender: 'male', browserVoiceMatch: ['male', 'man', 'mark', 'alex', 'google us english'] },
-  { id: 'neutral', label: 'Sage (Modern)', description: 'Neutral, modern voice', gender: 'neutral', browserVoiceMatch: ['neutral', 'google'] },
+  {
+    id: 'skylar',
+    label: 'Skylar',
+    description: 'Warm, expressive American female voice. Friendly and approachable.',
+    gender: 'female',
+    elevenlabsId: 'EXAVITQu4vr4xnSDxMaL',
+    rate: 1.0,
+    pitch: 1.15,
+    sampleText: "Hello! I'm Skylar, your AI receptionist. It's wonderful to hear from you! How may I brighten your day?",
+    accent: 'American',
+    tags: ['Warm', 'Friendly', 'Expressive']
+  },
+  {
+    id: 'daniel',
+    label: 'Daniel',
+    description: 'Deep, authoritative British male voice. Professional and trustworthy.',
+    gender: 'male',
+    elevenlabsId: 'onwK4e9ZLuTAKqWW03F9',
+    rate: 0.95,
+    pitch: 0.85,
+    sampleText: "Good day. I'm Daniel, your AI receptionist. How may I be of assistance to you today?",
+    accent: 'British',
+    tags: ['Deep', 'Authoritative', 'Professional']
+  },
+  {
+    id: 'gemma',
+    label: 'Gemma',
+    description: 'Soft, gentle Irish female voice. Calm and reassuring.',
+    gender: 'female',
+    elevenlabsId: 'pFZP5JQG7iQjIQuC4Bku',
+    rate: 0.95,
+    pitch: 1.2,
+    sampleText: "Hi there! I'm Gemma. Thank you so much for calling. How can I help you today?",
+    accent: 'Irish',
+    tags: ['Soft', 'Gentle', 'Calm']
+  },
+  {
+    id: 'parker',
+    label: 'Parker',
+    description: 'Clear, confident American male voice. Modern and energetic.',
+    gender: 'male',
+    elevenlabsId: 'OXyPsHkaYpLrZFlUdLVd',
+    rate: 1.05,
+    pitch: 0.95,
+    sampleText: "Hey there! Parker here, your AI receptionist. What can I do for you today?",
+    accent: 'American',
+    tags: ['Clear', 'Confident', 'Energetic']
+  },
+  {
+    id: 'archie',
+    label: 'Archie',
+    description: 'Young, upbeat British male voice. Cheerful and engaging.',
+    gender: 'male',
+    elevenlabsId: 'XrC1iQiEwGHWoAojsVZF',
+    rate: 1.05,
+    pitch: 1.1,
+    sampleText: "Hello! Archie here, ready to help! What can I do for you today, mate?",
+    accent: 'British',
+    tags: ['Young', 'Upbeat', 'Cheerful']
+  },
+  {
+    id: 'jacqueline',
+    label: 'Jacqueline',
+    description: 'Elegant, sophisticated American female voice. Polished and refined.',
+    gender: 'female',
+    elevenlabsId: 'sGyzj8KtG3bOQ9aQoHGJ',
+    rate: 0.98,
+    pitch: 1.05,
+    sampleText: "Welcome. I'm Jacqueline, your AI receptionist. How may I assist you on this fine day?",
+    accent: 'American',
+    tags: ['Elegant', 'Sophisticated', 'Polished']
+  },
 ];
+
+// Color themes for each voice
+const VOICE_COLORS: Record<string, { bg: string; border: string; text: string; gradient: string }> = {
+  skylar: { bg: 'from-rose-500 to-pink-600', border: 'border-rose-500', text: 'text-rose-400', gradient: 'from-rose-500/20 to-pink-500/20' },
+  daniel: { bg: 'from-blue-600 to-indigo-700', border: 'border-blue-500', text: 'text-blue-400', gradient: 'from-blue-500/20 to-indigo-500/20' },
+  gemma: { bg: 'from-emerald-500 to-teal-600', border: 'border-emerald-500', text: 'text-emerald-400', gradient: 'from-emerald-500/20 to-teal-500/20' },
+  parker: { bg: 'from-amber-500 to-orange-600', border: 'border-amber-500', text: 'text-amber-400', gradient: 'from-amber-500/20 to-orange-500/20' },
+  archie: { bg: 'from-violet-500 to-purple-600', border: 'border-violet-500', text: 'text-violet-400', gradient: 'from-violet-500/20 to-purple-500/20' },
+  jacqueline: { bg: 'from-fuchsia-500 to-pink-600', border: 'border-fuchsia-500', text: 'text-fuchsia-400', gradient: 'from-fuchsia-500/20 to-pink-500/20' },
+};
 
 export default function VoicePreview({ 
   selectedVoice, 
@@ -31,9 +114,9 @@ export default function VoicePreview({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [currentPreview, setCurrentPreview] = useState<string | null>(null);
   const [audioSupported, setAudioSupported] = useState(true);
+  const [waveformActive, setWaveformActive] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  // Load available browser voices
   useEffect(() => {
     if (!('speechSynthesis' in window)) {
       setAudioSupported(false);
@@ -55,69 +138,61 @@ export default function VoicePreview({
     };
   }, []);
 
-  // Find best matching browser voice for a given option
-  const findBrowserVoice = (option: VoiceOption): SpeechSynthesisVoice | null => {
+  // Find best browser voice based on gender
+  const findBrowserVoice = (gender: 'male' | 'female'): SpeechSynthesisVoice | null => {
     if (browserVoices.length === 0) return null;
 
-    // Try to match by keywords
-    for (const keyword of option.browserVoiceMatch) {
+    const femaleKeywords = ['female', 'woman', 'zira', 'samantha', 'victoria', 'karen', 'allison', 'fiona', 'moira', 'tessa'];
+    const maleKeywords = ['male', 'man', 'david', 'daniel', 'alex', 'fred', 'tom', 'mark', 'jorge', 'diego'];
+
+    const keywords = gender === 'female' ? femaleKeywords : maleKeywords;
+    
+    for (const keyword of keywords) {
       const match = browserVoices.find(v => 
         v.name.toLowerCase().includes(keyword.toLowerCase())
       );
       if (match) return match;
     }
 
-    // Fallback: match by gender
-    const genderKeywords = {
-      female: ['female', 'woman', 'zira', 'samantha', 'allison', 'karen', 'victoria', 'fiona'],
-      male: ['male', 'man', 'david', 'daniel', 'mark', 'alex', 'fred', 'tom'],
-      neutral: ['google', 'neutral', 'default']
-    };
-
-    for (const keyword of genderKeywords[option.gender]) {
-      const match = browserVoices.find(v => 
-        v.name.toLowerCase().includes(keyword.toLowerCase())
-      );
-      if (match) return match;
-    }
-
-    // Last resort: return first English voice
     return browserVoices.find(v => v.lang.startsWith('en')) || browserVoices[0];
   };
 
-  const speak = (text: string, voiceId: string) => {
+  const speak = (voiceId: string) => {
     if (!audioSupported) return;
 
-    // Stop any current speech
     window.speechSynthesis.cancel();
     
     const option = VOICE_OPTIONS.find(v => v.id === voiceId);
     if (!option) return;
 
-    const browserVoice = findBrowserVoice(option);
-    const utterance = new SpeechSynthesisUtterance(text);
+    const browserVoice = findBrowserVoice(option.gender);
+    const utterance = new SpeechSynthesisUtterance(option.sampleText);
     
     if (browserVoice) {
       utterance.voice = browserVoice;
     }
     
-    utterance.rate = speakingRate;
-    utterance.pitch = pitch;
+    // Apply voice-specific tuning combined with user settings
+    utterance.rate = option.rate * speakingRate;
+    utterance.pitch = option.pitch * pitch;
     utterance.volume = 1;
     
     utterance.onstart = () => {
       setIsSpeaking(true);
       setCurrentPreview(voiceId);
+      setWaveformActive(true);
     };
     
     utterance.onend = () => {
       setIsSpeaking(false);
       setCurrentPreview(null);
+      setWaveformActive(false);
     };
     
     utterance.onerror = () => {
       setIsSpeaking(false);
       setCurrentPreview(null);
+      setWaveformActive(false);
     };
 
     utteranceRef.current = utterance;
@@ -128,17 +203,14 @@ export default function VoicePreview({
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
     setCurrentPreview(null);
+    setWaveformActive(false);
   };
 
   const previewVoice = (voiceId: string) => {
     if (currentPreview === voiceId && isSpeaking) {
       stop();
     } else {
-      const option = VOICE_OPTIONS.find(v => v.id === voiceId);
-      const sampleText = option?.gender === 'male'
-        ? "Hello! I'm your AI receptionist. Thank you for calling. How may I assist you today?"
-        : "Hello! I'm your AI receptionist. Thank you for calling. How may I assist you today?";
-      speak(sampleText, voiceId);
+      speak(voiceId);
     }
   };
 
@@ -159,6 +231,7 @@ export default function VoicePreview({
         <h4 className="text-sm font-semibold text-white flex items-center gap-2">
           <i className="fa-solid fa-headphones text-violet-400"></i>
           Voice Preview
+          <span className="text-xs font-normal text-gray-400">({VOICE_OPTIONS.length} voices available)</span>
         </h4>
         {isSpeaking && (
           <button
@@ -171,93 +244,119 @@ export default function VoicePreview({
         )}
       </div>
 
-      {/* Voice Cards */}
-      <div className="space-y-2">
+      {/* Voice Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {VOICE_OPTIONS.map((option) => {
           const isSelected = selectedVoice === option.id;
           const isPlaying = currentPreview === option.id && isSpeaking;
-          const browserVoice = findBrowserVoice(option);
+          const colors = VOICE_COLORS[option.id];
 
           return (
             <div
               key={option.id}
-              className={`p-3 rounded-lg border transition-all ${
+              className={`relative p-4 rounded-xl border transition-all overflow-hidden ${
                 isSelected
-                  ? 'border-violet-500 bg-violet-500/10'
+                  ? `${colors.border} bg-gradient-to-br ${colors.gradient}`
                   : 'border-gray-700 bg-gray-800/30 hover:border-gray-600'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3 flex-1">
-                  {/* Voice Avatar */}
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
-                    option.gender === 'female' 
-                      ? 'bg-gradient-to-br from-pink-500 to-rose-600' 
-                      : option.gender === 'male'
-                      ? 'bg-gradient-to-br from-blue-500 to-indigo-600'
-                      : 'bg-gradient-to-br from-emerald-500 to-teal-600'
-                  }`}>
-                    <i className={`fa-solid ${
-                      option.gender === 'female' ? 'fa-person-dress' : 
-                      option.gender === 'male' ? 'fa-person' : 'fa-user'
-                    } text-white text-sm`}></i>
-                  </div>
+              {/* Playing indicator */}
+              {isPlaying && (
+                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 via-pink-500 to-violet-500 animate-pulse"></div>
+              )}
 
-                  {/* Voice Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium text-white">{option.label}</p>
-                      {isSelected && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300">Selected</span>
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-400">{option.description}</p>
-                    {browserVoice && (
-                      <p className="text-xs text-gray-500 mt-0.5 truncate">
-                        <i className="fa-solid fa-microphone mr-1"></i>
-                        {browserVoice.name} ({browserVoice.lang})
-                      </p>
-                    )}
-                  </div>
+              <div className="flex items-start gap-3">
+                {/* Voice Avatar */}
+                <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${colors.bg} flex items-center justify-center flex-shrink-0 shadow-lg`}>
+                  <span className="text-lg font-bold text-white">
+                    {option.label.charAt(0)}
+                  </span>
                 </div>
 
-                {/* Controls */}
-                <div className="flex items-center gap-2">
-                  {/* Play/Stop Button */}
-                  <button
-                    onClick={() => previewVoice(option.id)}
-                    className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
-                      isPlaying
-                        ? 'bg-red-500 hover:bg-red-600'
-                        : 'bg-violet-600 hover:bg-violet-700'
-                    }`}
-                    title={isPlaying ? 'Stop' : 'Preview voice'}
-                  >
-                    {isPlaying ? (
-                      <>
-                        <div className="flex gap-0.5">
-                          <div className="w-0.5 h-3 bg-white rounded animate-pulse"></div>
-                          <div className="w-0.5 h-3 bg-white rounded animate-pulse" style={{ animationDelay: '0.1s' }}></div>
-                          <div className="w-0.5 h-3 bg-white rounded animate-pulse" style={{ animationDelay: '0.2s' }}></div>
-                        </div>
-                      </>
-                    ) : (
-                      <i className="fa-solid fa-play text-white text-xs ml-0.5"></i>
+                {/* Voice Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-bold text-white">{option.label}</p>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-gray-700/50 text-gray-300">
+                      {option.accent}
+                    </span>
+                    {isSelected && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${colors.text} bg-black/20`}>
+                        <i className="fa-solid fa-check mr-1"></i>Active
+                      </span>
                     )}
-                  </button>
-
-                  {/* Select Button */}
-                  <button
-                    onClick={() => onSelectVoice(option.id)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                      isSelected
-                        ? 'bg-violet-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {isSelected ? '✓ Active' : 'Select'}
-                  </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1 leading-relaxed">{option.description}</p>
+                  
+                  {/* Tags */}
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {option.tags.map((tag, idx) => (
+                      <span 
+                        key={idx}
+                        className={`text-[10px] px-1.5 py-0.5 rounded-full ${colors.text} bg-black/20`}
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
                 </div>
+              </div>
+
+              {/* Controls */}
+              <div className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-700/50">
+                {/* Play Button */}
+                <button
+                  onClick={() => previewVoice(option.id)}
+                  className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2 ${
+                    isPlaying
+                      ? `bg-gradient-to-r ${colors.bg} text-white shadow-lg`
+                      : `bg-gray-700/50 text-gray-200 hover:bg-gray-700`
+                  }`}
+                >
+                  {isPlaying ? (
+                    <>
+                      <div className="flex gap-0.5 items-center">
+                        {[1, 2, 3, 4, 5].map((i) => (
+                          <div 
+                            key={i}
+                            className="w-0.5 bg-white rounded-full animate-pulse"
+                            style={{ 
+                              height: `${8 + Math.random() * 8}px`,
+                              animationDelay: `${i * 0.1}s`,
+                              animationDuration: '0.6s'
+                            }}
+                          ></div>
+                        ))}
+                      </div>
+                      <span>Playing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-play text-xs"></i>
+                      <span>Preview</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Select Button */}
+                <button
+                  onClick={() => onSelectVoice(option.id)}
+                  className={`px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                    isSelected
+                      ? `bg-gradient-to-r ${colors.bg} text-white`
+                      : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  {isSelected ? '✓' : 'Use'}
+                </button>
+              </div>
+
+              {/* ElevenLabs ID */}
+              <div className="mt-2 pt-2 border-t border-gray-700/30">
+                <p className="text-[10px] text-gray-500 font-mono truncate">
+                  <i className="fa-solid fa-fingerprint mr-1"></i>
+                  ID: {option.elevenlabsId}
+                </p>
               </div>
             </div>
           );
@@ -265,9 +364,9 @@ export default function VoicePreview({
       </div>
 
       {/* Custom Text Preview */}
-      <div className="p-4 rounded-lg bg-gray-800/50 border border-gray-700/50">
+      <div className="p-4 rounded-xl bg-gray-800/50 border border-gray-700/50">
         <label className="block text-xs font-medium text-gray-300 mb-2">
-          <i className="fa-solid fa-keyboard mr-1"></i>
+          <i className="fa-solid fa-keyboard mr-1 text-violet-400"></i>
           Custom Preview Text
         </label>
         <div className="flex gap-2">
@@ -282,7 +381,18 @@ export default function VoicePreview({
             onClick={() => {
               const input = document.getElementById('customVoiceText') as HTMLInputElement;
               if (input?.value) {
-                speak(input.value, selectedVoice);
+                window.speechSynthesis.cancel();
+                const option = VOICE_OPTIONS.find(v => v.id === selectedVoice);
+                const browserVoice = option ? findBrowserVoice(option.gender) : null;
+                const utterance = new SpeechSynthesisUtterance(input.value);
+                if (browserVoice) utterance.voice = browserVoice;
+                if (option) {
+                  utterance.rate = option.rate * speakingRate;
+                  utterance.pitch = option.pitch * pitch;
+                }
+                utterance.onstart = () => { setIsSpeaking(true); setCurrentPreview(selectedVoice); };
+                utterance.onend = () => { setIsSpeaking(false); setCurrentPreview(null); };
+                window.speechSynthesis.speak(utterance);
               }
             }}
             disabled={isSpeaking}
@@ -323,8 +433,8 @@ export default function VoicePreview({
         <p className="text-xs text-blue-300 flex items-start gap-2">
           <i className="fa-solid fa-circle-info mt-0.5"></i>
           <span>
-            Voice preview uses your browser's built-in speech synthesis. For production use with premium voices, 
-            connect ElevenLabs API in Settings. Available voices depend on your browser and OS.
+            <strong>Browser Preview:</strong> Uses your browser's speech synthesis with voice-specific pitch/rate tuning to approximate each voice. 
+            For production with authentic voice quality, connect <strong>ElevenLabs API</strong> in Settings → Integrations.
           </span>
         </p>
       </div>

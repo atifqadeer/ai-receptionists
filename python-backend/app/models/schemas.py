@@ -54,7 +54,7 @@ class AgentConfig(BaseModel):
     agent_name: str = "Aria"
     company_name: str = "TechCorp Solutions"
     language: str = "English"
-    voice: str = "female-1"
+    voice: str = "skylar"
     speaking_rate: float = 1.0
     pitch: float = 1.0
     greeting: str = "Hello! Thank you for calling. How can I help you today?"
