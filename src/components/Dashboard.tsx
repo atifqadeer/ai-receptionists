@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { downloadPythonBackend } from '../utils/downloadZip';
+import DiagnosticTool from './DiagnosticTool';
 
 export default function Dashboard() {
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [timeRange, setTimeRange] = useState('today');
   const [downloading, setDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
@@ -202,6 +204,62 @@ export default function Dashboard() {
             <p className="text-lg font-bold text-white mt-1">91.3%</p>
           </div>
         </div>
+      </div>
+
+      {/* Diagnostic Tool */}
+      <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-white flex items-center gap-2">
+            <i className="fa-solid fa-wrench text-violet-400"></i>
+            Troubleshooting
+          </h3>
+          <button
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs hover:bg-violet-700 transition-all flex items-center gap-1"
+          >
+            <i className={`fa-solid ${showDiagnostics ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+            {showDiagnostics ? 'Hide' : 'Show'} Diagnostics
+          </button>
+        </div>
+        
+        {showDiagnostics && <DiagnosticTool />}
+        
+        {!showDiagnostics && (
+          <div className="space-y-2">
+            <p className="text-sm text-gray-400">
+              Having issues with buttons or features not working? Use the diagnostic tool to identify problems.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <a
+                href="/TROUBLESHOOTING.md"
+                target="_blank"
+                className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1"
+              >
+                <i className="fa-solid fa-book"></i>
+                View Troubleshooting Guide
+              </a>
+              <span className="text-xs text-gray-600">•</span>
+              <button
+                onClick={() => window.location.reload()}
+                className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1"
+              >
+                <i className="fa-solid fa-rotate"></i>
+                Refresh Page
+              </button>
+              <span className="text-xs text-gray-600">•</span>
+              <button
+                onClick={() => {
+                  localStorage.clear();
+                  window.location.reload();
+                }}
+                className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1"
+              >
+                <i className="fa-solid fa-trash"></i>
+                Clear Cache & Reload
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
