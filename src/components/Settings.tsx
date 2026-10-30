@@ -201,9 +201,12 @@ export default function Settings() {
                     </div>
                     <button
                       onClick={() => setGeneral({ ...general, [toggle.key]: !general[toggle.key as keyof typeof general] })}
-                      className={`w-11 h-6 rounded-full transition-all ${general[toggle.key as keyof typeof general] ? 'bg-violet-600' : 'bg-gray-700'}`}
+                      className={`relative w-11 h-6 rounded-full transition-all ${general[toggle.key as keyof typeof general] ? 'bg-violet-600' : 'bg-gray-700'}`}
                     >
-                      <div style={{ width: '18px', height: '18px', borderRadius: '50%', background: 'white', transition: 'transform 0.2s', transform: general[toggle.key as keyof typeof general] ? 'translateX(22px)' : 'translateX(2px)' }}></div>
+                      <div 
+                        className="absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-white transition-transform duration-200 ease-in-out"
+                        style={{ transform: general[toggle.key as keyof typeof general] ? 'translateX(20px)' : 'translateX(0)' }}
+                      ></div>
                     </button>
                   </div>
                 ))}
@@ -988,9 +991,12 @@ export default function Settings() {
                   </div>
                   <button
                     onClick={() => setTelephony({ ...telephony, enableSip: !telephony.enableSip })}
-                    className={`w-11 h-6 rounded-full transition-all ${telephony.enableSip ? 'bg-violet-600' : 'bg-gray-700'}`}
+                    className={`relative w-11 h-6 rounded-full transition-all ${telephony.enableSip ? 'bg-violet-600' : 'bg-gray-700'}`}
                   >
-                    <div style={{ width: '18px', height: '18px', borderRadius: '50%', background: 'white', transition: 'transform 0.2s', transform: telephony.enableSip ? 'translateX(22px)' : 'translateX(2px)' }}></div>
+                    <div 
+                      className="absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-white transition-transform duration-200 ease-in-out"
+                      style={{ transform: telephony.enableSip ? 'translateX(20px)' : 'translateX(0)' }}
+                    ></div>
                   </button>
                 </div>
               </div>
@@ -1114,9 +1120,12 @@ export default function Settings() {
                     </div>
                     <button
                       onClick={() => setAi({ ...ai, [toggle.key]: !ai[toggle.key as keyof typeof ai] })}
-                      className={`w-11 h-6 rounded-full transition-all ${ai[toggle.key as keyof typeof ai] ? 'bg-violet-600' : 'bg-gray-700'}`}
+                      className={`relative w-11 h-6 rounded-full transition-all ${ai[toggle.key as keyof typeof ai] ? 'bg-violet-600' : 'bg-gray-700'}`}
                     >
-                      <div style={{ width: '18px', height: '18px', borderRadius: '50%', background: 'white', transition: 'transform 0.2s', transform: ai[toggle.key as keyof typeof ai] ? 'translateX(22px)' : 'translateX(2px)' }}></div>
+                      <div 
+                        className="absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-white transition-transform duration-200 ease-in-out"
+                        style={{ transform: ai[toggle.key as keyof typeof ai] ? 'translateX(20px)' : 'translateX(0)' }}
+                      ></div>
                     </button>
                   </div>
                 ))}

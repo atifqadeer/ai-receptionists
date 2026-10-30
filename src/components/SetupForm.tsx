@@ -261,9 +261,12 @@ export default function SetupForm() {
                 </div>
                 <button
                   onClick={() => setBehavior({ ...behavior, allowInterrupts: !behavior.allowInterrupts })}
-                  className={`w-12 h-6 rounded-full transition-all ${behavior.allowInterrupts ? 'bg-violet-600' : 'bg-gray-700'}`}
+                  className={`relative w-12 h-6 rounded-full transition-all ${behavior.allowInterrupts ? 'bg-violet-600' : 'bg-gray-700'}`}
                 >
-                  <div className={`w-5 h-5 rounded-full bg-white transition-transform ${behavior.allowInterrupts ? 'translate-x-6' : 'translate-x-0.5'}`}></div>
+                  <div 
+                    className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform duration-200 ease-in-out"
+                    style={{ transform: behavior.allowInterrupts ? 'translateX(24px)' : 'translateX(0)' }}
+                  ></div>
                 </button>
               </div>
             </div>

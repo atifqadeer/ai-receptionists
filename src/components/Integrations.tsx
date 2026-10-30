@@ -457,9 +457,12 @@ export default function Integrations() {
                     {service.key !== 'openai' && (
                       <button
                         onClick={() => updateService(service.key as any, 'enabled', !isEnabled)}
-                        className={`w-11 h-6 rounded-full transition-all flex-shrink-0 ml-3 ${isEnabled ? 'bg-violet-600' : 'bg-gray-700'}`}
+                        className={`relative w-11 h-6 rounded-full transition-all flex-shrink-0 ml-3 ${isEnabled ? 'bg-violet-600' : 'bg-gray-700'}`}
                       >
-                        <div style={{ width: '18px', height: '18px', borderRadius: '50%', background: 'white', transition: 'transform 0.2s', transform: isEnabled ? 'translateX(22px)' : 'translateX(2px)' }}></div>
+                        <div 
+                          className="absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-white transition-transform duration-200 ease-in-out"
+                          style={{ transform: isEnabled ? 'translateX(20px)' : 'translateX(0)' }}
+                        ></div>
                       </button>
                     )}
                   </div>

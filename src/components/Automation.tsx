@@ -145,9 +145,12 @@ export default function Automation() {
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => toggleRule(rule.id)}
-                    className={`w-11 h-6 rounded-full transition-all ${rule.enabled ? 'bg-violet-600' : 'bg-gray-700'}`}
+                    className={`relative w-11 h-6 rounded-full transition-all ${rule.enabled ? 'bg-violet-600' : 'bg-gray-700'}`}
                   >
-                    <div className={`w-4.5 h-4.5 rounded-full bg-white transition-transform ${rule.enabled ? 'translate-x-5.5' : 'translate-x-0.5'}`} style={{ width: '18px', height: '18px', transform: rule.enabled ? 'translateX(22px)' : 'translateX(2px)' }}></div>
+                    <div 
+                      className="absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-white transition-transform duration-200 ease-in-out"
+                      style={{ transform: rule.enabled ? 'translateX(20px)' : 'translateX(0)' }}
+                    ></div>
                   </button>
                   <button onClick={() => deleteRule(rule.id)} className="text-gray-500 hover:text-red-400 transition-all">
                     <i className="fa-solid fa-trash text-sm"></i>
