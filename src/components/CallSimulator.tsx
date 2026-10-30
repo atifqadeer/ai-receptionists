@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 interface Message {
   id: number;
@@ -9,13 +10,40 @@ interface Message {
 }
 
 export default function CallSimulator() {
-  const [messages, setMessages] = useState<Message[]>([
-    { id: 1, sender: 'system', text: 'Call started - AI Receptionist Aria is now active', timestamp: '10:30:00 AM' },
-    { id: 2, sender: 'agent', text: "Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?", timestamp: '10:30:02 AM' },
-  ]);
+  // Load configurations from localStorage (shared with Agent Setup)
+  const [identity] = useLocalStorage('agent-identity', {
+    agentName: 'Aria',
+    companyName: 'TechCorp Solutions',
+    voice: 'skylar',
+  });
+
+  const [behavior, setBehavior] = useLocalStorage('agent-behavior', {
+    greeting: "Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?",
+    farewell: 'Thank you for calling! Have a wonderful day.',
+    holdMessage: 'Thank you for your patience. I\'m looking into that for you right now.',
+    transferPhrase: 'Let me connect you with a specialist who can better assist you.',
+    maxCallDuration: 15,
+    silenceTimeout: 8,
+    allowInterrupts: true,
+    personality: 'professional',
+  });
+
+  const [knowledge] = useLocalStorage('agent-knowledge', {
+    businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
+    phone: '+1 (555) 123-4567',
+    email: 'support@techcorp.com',
+    services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
+  });
+
+  // Local state for editing greeting
+  const [editingGreeting, setEditingGreeting] = useState(false);
+  const [tempGreeting, setTempGreeting] = useState(behavior.greeting);
+  const [greetingSaved, setGreetingSaved] = useState(false);
+
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [callStatus, setCallStatus] = useState<'active' | 'ended' | 'idle'>('active');
+  const [callStatus, setCallStatus] = useState<'active' | 'ended' | 'idle'>('idle');
   const [callDuration, setCallDuration] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -28,13 +56,14 @@ export default function CallSimulator() {
     "I have a complaint",
   ];
 
+  // Agent responses use knowledge base data
   const agentResponses: Record<string, { text: string; intent: string }> = {
     'appointment': {
-      text: "I'd be happy to help you book an appointment! We have availability this week. Could you please tell me your preferred date and time? We're open Monday through Friday, 9 AM to 6 PM.",
+      text: `I'd be happy to help you book an appointment! We have availability this week. Could you please tell me your preferred date and time? We're open ${knowledge.businessHours}.`,
       intent: 'Appointment Booking'
     },
     'hours': {
-      text: "Our business hours are Monday through Friday, 9:00 AM to 6:00 PM Eastern Standard Time. We're closed on weekends and major holidays. Is there anything else I can help you with?",
+      text: `Our business hours are ${knowledge.businessHours}. Is there anything else I can help you with?`,
       intent: 'Business Hours Inquiry'
     },
     'support': {
@@ -42,11 +71,11 @@ export default function CallSimulator() {
       intent: 'Technical Support'
     },
     'manager': {
-      text: "I'd be happy to connect you with a manager. Let me check their availability... Our manager is currently available. Would you like me to transfer you now, or would you prefer to schedule a specific time?",
+      text: behavior.transferPhrase || "I'd be happy to connect you with a manager. Let me check their availability. Would you like me to transfer you now?",
       intent: 'Transfer Request'
     },
     'services': {
-      text: "We offer a range of services including Web Development, Mobile Application Development, Cloud Solutions, and AI Integration. Each service is tailored to your specific needs. Would you like more details about any particular service?",
+      text: `We offer ${knowledge.services}. Each service is tailored to your specific needs. Would you like more details about any particular service? You can also reach us at ${knowledge.email}.`,
       intent: 'General Inquiry'
     },
     'complaint': {
@@ -119,22 +148,202 @@ export default function CallSimulator() {
 
   const endCall = () => {
     setCallStatus('ended');
-    setMessages(prev => [...prev, {
-      id: Date.now(),
-      sender: 'system',
-      text: `Call ended - Duration: ${formatDuration(callDuration)} - Summary generated`,
-      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    }]);
+    const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setMessages(prev => [
+      ...prev,
+      {
+        id: Date.now(),
+        sender: 'agent',
+        text: behavior.farewell,
+        timestamp: now,
+      },
+      {
+        id: Date.now() + 1,
+        sender: 'system',
+        text: `Call ended - Duration: ${formatDuration(callDuration)} - Summary generated`,
+        timestamp: now
+      }
+    ]);
+  };
+
+  const startCall = () => {
+    setCallStatus('active');
+    setCallDuration(0);
+    const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setMessages([
+      { 
+        id: 1, 
+        sender: 'system', 
+        text: `Call started - ${identity.agentName} from ${identity.companyName} is now active`, 
+        timestamp: now 
+      },
+      { 
+        id: 2, 
+        sender: 'agent', 
+        text: behavior.greeting, 
+        timestamp: now 
+      },
+    ]);
   };
 
   const newCall = () => {
-    setCallStatus('active');
-    setCallDuration(0);
-    setMessages([
-      { id: 1, sender: 'system', text: 'New call started - AI Receptionist Aria is now active', timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) },
-      { id: 2, sender: 'agent', text: "Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?", timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) },
-    ]);
+    startCall();
   };
+
+  // Save edited greeting to localStorage
+  const saveGreeting = () => {
+    setBehavior({ ...behavior, greeting: tempGreeting });
+    setEditingGreeting(false);
+    setGreetingSaved(true);
+    setTimeout(() => setGreetingSaved(false), 2000);
+  };
+
+  // Reset greeting to current saved value
+  const resetGreeting = () => {
+    setTempGreeting(behavior.greeting);
+    setEditingGreeting(false);
+  };
+
+  // Idle state - show greeting editor and start call button
+  if (callStatus === 'idle') {
+    return (
+      <div className="space-y-6">
+        {/* Agent Info Card */}
+        <div className="bg-gradient-to-br from-violet-600/10 to-indigo-600/10 rounded-xl border border-violet-500/30 p-6">
+          <div className="flex items-start gap-4">
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center flex-shrink-0">
+              <i className="fa-solid fa-comments text-white text-2xl"></i>
+            </div>
+            <div className="flex-1">
+              <h2 className="text-xl font-bold text-white mb-1">Text Call Simulator</h2>
+              <p className="text-sm text-gray-300 mb-3">
+                Test your AI agent <strong>{identity.agentName}</strong> from <strong>{identity.companyName}</strong> with text-based conversations. 
+                The greeting message below will be used when the call starts.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-300">
+                  <i className="fa-solid fa-robot mr-1"></i>Agent: {identity.agentName}
+                </span>
+                <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-300">
+                  <i className="fa-solid fa-building mr-1"></i>Company: {identity.companyName}
+                </span>
+                <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-300">
+                  <i className="fa-solid fa-clock mr-1"></i>Hours: {knowledge.businessHours}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Greeting Editor */}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                <i className="fa-solid fa-hand-wave text-violet-400"></i>
+                Greeting Message
+              </h3>
+              <p className="text-xs text-gray-400 mt-1">
+                This is what the AI agent says when a call starts. Edit it here or in <strong>Agent Setup → Behavior & Scripts</strong>.
+              </p>
+            </div>
+            {!editingGreeting && (
+              <button
+                onClick={() => {
+                  setTempGreeting(behavior.greeting);
+                  setEditingGreeting(true);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-sm hover:bg-violet-700 transition-all flex items-center gap-1"
+              >
+                <i className="fa-solid fa-pen text-xs"></i>
+                Edit
+              </button>
+            )}
+          </div>
+
+          {editingGreeting ? (
+            <div className="space-y-3">
+              <textarea
+                value={tempGreeting}
+                onChange={(e) => setTempGreeting(e.target.value)}
+                rows={4}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-white focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none resize-none"
+                placeholder="Enter greeting message..."
+              />
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-500">
+                  <i className="fa-solid fa-info-circle mr-1"></i>
+                  Changes will be saved to Agent Setup automatically
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={resetGreeting}
+                    className="px-3 py-1.5 rounded-lg border border-gray-700 text-gray-300 text-sm hover:bg-gray-800 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveGreeting}
+                    disabled={!tempGreeting.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-sm hover:bg-violet-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                  >
+                    <i className="fa-solid fa-save text-xs"></i>
+                    Save Greeting
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="p-4 rounded-lg bg-gray-800/50 border border-gray-700/50">
+              <p className="text-sm text-white leading-relaxed">{behavior.greeting}</p>
+              {greetingSaved && (
+                <div className="mt-3 p-2 rounded bg-emerald-500/10 border border-emerald-500/30">
+                  <p className="text-xs text-emerald-300 flex items-center gap-1">
+                    <i className="fa-solid fa-check-circle"></i>
+                    Greeting saved! This will sync with Agent Setup.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Farewell Preview */}
+          <div className="mt-4 pt-4 border-t border-gray-800">
+            <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+              <i className="fa-solid fa-goodbye text-violet-400"></i>
+              <strong>Farewell Message</strong> (used when call ends):
+            </p>
+            <p className="text-sm text-gray-300 italic">{behavior.farewell}</p>
+            <p className="text-xs text-gray-500 mt-2">
+              <i className="fa-solid fa-info-circle mr-1"></i>
+              Edit in <strong>Agent Setup → Behavior & Scripts</strong>
+            </p>
+          </div>
+        </div>
+
+        {/* Start Call Button */}
+        <button
+          onClick={startCall}
+          className="w-full py-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-semibold text-lg hover:from-emerald-600 hover:to-teal-700 transition-all flex items-center justify-center gap-3 shadow-lg"
+        >
+          <i className="fa-solid fa-phone text-xl"></i>
+          Start Call with {identity.agentName}
+        </button>
+
+        {/* Info Note */}
+        <div className="p-4 rounded-lg bg-blue-500/5 border border-blue-500/20">
+          <p className="text-sm text-blue-300 flex items-start gap-2">
+            <i className="fa-solid fa-circle-info mt-0.5"></i>
+            <span>
+              <strong>Tip:</strong> The greeting and farewell messages are shared with <strong>Agent Setup</strong>. 
+              Any changes you make here will also update the agent's configuration. 
+              For a real voice call experience, try the <strong>Make a Call</strong> feature instead.
+            </span>
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-180px)]">
@@ -148,7 +357,9 @@ export default function CallSimulator() {
               <p className="text-sm font-medium text-white">
                 {callStatus === 'active' ? 'Call in Progress' : callStatus === 'ended' ? 'Call Ended' : 'Ready'}
               </p>
-              <p className="text-xs text-gray-400">Duration: {formatDuration(callDuration)}</p>
+              <p className="text-xs text-gray-400">
+                Duration: {formatDuration(callDuration)} • Agent: {identity.agentName}
+              </p>
             </div>
           </div>
           <div className="flex gap-2">
