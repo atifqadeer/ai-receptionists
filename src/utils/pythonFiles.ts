@@ -748,6 +748,27 @@ class IntentType(str, Enum):
     ERROR = "error"
 
 
+class Personality(str, Enum):
+    PROFESSIONAL = "professional"
+    FRIENDLY = "friendly"
+    CASUAL = "casual"
+    EMPATHETIC = "empathetic"
+
+
+# ---- Agent Config ----
+class KnowledgeBase(BaseModel):
+    business_hours: str = "Monday to Friday, 9:00 AM to 6:00 PM EST"
+    address: str = ""
+    phone: str = ""
+    email: str = ""
+    services: str = ""
+
+
+class FAQ(BaseModel):
+    question: str
+    answer: str
+
+
 class AgentConfig(BaseModel):
     agent_name: str = "Aria"
     company_name: str = "TechCorp Solutions"
@@ -763,8 +784,13 @@ class AgentConfig(BaseModel):
     allow_interrupts: bool = True
     knowledge_base: Dict[str, str] = {}
     faqs: List[Dict[str, str]] = []
+    # Uploaded knowledge documents (.md/.txt files from Agent Setup).
+    # Each item: {"name": filename, "content": full text of the file}.
+    # The agent answers from these together with knowledge_base.
+    knowledge_documents: List[Dict[str, str]] = []
 
 
+# ---- Call Models ----
 class CallContext(BaseModel):
     call_id: str
     caller_number: Optional[str] = None
@@ -772,6 +798,14 @@ class CallContext(BaseModel):
     status: CallStatus = CallStatus.ACTIVE
     started_at: datetime = Field(default_factory=datetime.utcnow)
     duration_seconds: int = 0
+
+
+class Message(BaseModel):
+    id: str
+    sender: str  # "agent", "caller", "system"
+    text: str
+    timestamp: str
+    intent: Optional[str] = None
 
 
 class AgentResponse(BaseModel):
@@ -784,6 +818,7 @@ class AgentResponse(BaseModel):
     action_data: Dict[str, Any] = {}
 
 
+# ---- Automation Models ----
 class AutomationRule(BaseModel):
     id: int
     name: str
@@ -801,6 +836,7 @@ class Workflow(BaseModel):
     calls: int = 0
 
 
+# ---- Analytics Models ----
 class CallLog(BaseModel):
     id: str
     caller: str
@@ -810,7 +846,53 @@ class CallLog(BaseModel):
     status: str
     intent: str
     satisfaction: int = 0
-`,
+
+
+class DashboardStats(BaseModel):
+    total_calls: int = 0
+    calls_handled: int = 0
+    avg_response_time: float = 0.0
+    satisfaction_rate: float = 0.0
+    resolution_rate: float = 0.0
+    transfer_rate: float = 0.0
+
+
+# ---- Settings Models ----
+class TelephonyConfig(BaseModel):
+    provider: str = "twilio"
+    account_sid: str = ""
+    auth_token: str = ""
+    phone_number: str = ""
+    webhook_url: str = ""
+    max_concurrent_calls: int = 10
+    enable_sip: bool = False
+
+
+class AIModelConfig(BaseModel):
+    provider: str = "openai"
+    model: str = "gpt-4-turbo-preview"
+    api_key: str = ""
+    temperature: float = 0.7
+    max_tokens: int = 500
+    system_prompt: str = ""
+    enable_function_calling: bool = True
+    enable_memory: bool = True
+
+
+class TeamMember(BaseModel):
+    id: int
+    name: str
+    role: str
+    email: str
+    status: str = "active"
+
+
+# ---- WebSocket Models ----
+class WSMessage(BaseModel):
+    type: str  # "text", "audio", "intent", "status", "error"
+    data: Dict[str, Any] = {}
+    call_id: Optional[str] = None
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())`,
 
   'app/services/__init__.py': `# Services module
 `,
@@ -946,6 +1028,9 @@ FAQs:
 
 COMPANY KNOWLEDGE (the main source for questions about the company — its history, policies, prices, delivery, warranty and anything else written here):
 {kb.get('company_info', '') or 'N/A'}
+
+KNOWLEDGE DOCUMENTS (uploaded files; answer from them exactly as from the company knowledge above):
+{chr(10).join([f"--- {d.get('name', 'document')} ---" + chr(10) + (d.get('content') or '') for d in config.knowledge_documents]) or 'None uploaded.'}
 
 RULES:
 1. Always greet the caller warmly
@@ -1087,11 +1172,46 @@ AVAILABLE INTENTS:
         """Split free-form company knowledge into searchable passages.
 
         Structure the agent reads: one fact per line; a long line is
-        split into its sentences; blank lines separate topics.
+        split into its sentences; blank lines separate topics. Markdown
+        is cleaned so answers read as plain speech: heading markers,
+        bold markers, bullets and table pipes are removed, and table
+        separator rows are dropped.
         """
-        passages = []
-        for line in (text or "").splitlines():
+        def clean(line: str) -> str:
+            line = re.sub(r"^#+\\s*", "", line.strip())   # heading markers
+            line = re.sub(r"^\\s*>\\s?", "", line)         # quote marker
             line = line.strip(" \\t-•*")
+            return line.replace("**", "").replace("__", "").strip()
+
+        def cells(line: str) -> list:
+            return [c.strip() for c in line.strip().strip("|").split("|") if c.strip()]
+
+        lines = (text or "").splitlines()
+        passages = []
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            # Markdown table: a header row followed by a |---|---| row.
+            # Each data row becomes "Header: value. Header: value." so a
+            # question naming either column can match and be answered.
+            if "|" in raw and i + 1 < len(lines) and "-" in lines[i + 1] and re.fullmatch(r"[|:\\-\\s]+", lines[i + 1].strip()):
+                header = [clean(c) for c in cells(raw)]
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    row = [clean(c) for c in cells(lines[i])]
+                    if header and len(row) == len(header):
+                        passages.append(". ".join(f"{h}: {c}" for h, c in zip(header, row)) + ".")
+                    elif row:
+                        passages.append(" — ".join(row))
+                    i += 1
+                continue
+            line = raw.strip()
+            i += 1
+            if not line or re.fullmatch(r"[|:\\-\\s]+", line):
+                continue  # blank, table separator row or horizontal rule
+            line = clean(line)
+            if "|" in line:                              # stray table row
+                line = re.sub(r"\\s*\\|\\s*", " — ", line).strip(" —")
             if not line:
                 continue
             if len(line) > 220:
@@ -1101,13 +1221,26 @@ AVAILABLE INTENTS:
                 passages.append(line)
         return passages
 
-    def _company_info_lookup(self, message: str, msg_words: set) -> Optional[tuple]:
-        """Answer from the free-form company knowledge text, if it matches."""
+    def _knowledge_sources(self) -> list:
+        """All free-form knowledge the agent answers from, in order:
+        the Company Knowledge text first, then each uploaded document."""
         kb = self.config.knowledge_base or {}
+        sources = []
         info = (kb.get("company_info") or "").strip()
-        if not info:
-            return None
-        passages = self._kb_passages(info)
+        if info:
+            sources.append(info)
+        for doc in self.config.knowledge_documents or []:
+            content = (doc.get("content") or "").strip()
+            if content:
+                sources.append(content)
+        return sources
+
+    def _company_info_lookup(self, message: str, msg_words: set) -> Optional[tuple]:
+        """Answer from the free-form company knowledge — the Company
+        Knowledge text plus every uploaded knowledge document."""
+        passages = []
+        for source in self._knowledge_sources():
+            passages.extend(self._kb_passages(source))
         if not passages:
             return None
 
@@ -1281,7 +1414,36 @@ Return only the category name, nothing else."""
     
     def get_config(self) -> AgentConfig:
         """Get current agent configuration"""
-        return self.config`,
+        return self.config
+
+    # ---- Knowledge documents (.md/.txt uploads from Agent Setup) ----
+
+    def list_knowledge_documents(self) -> list:
+        """Uploaded knowledge documents (names and sizes, not content)."""
+        return [
+            {"name": d.get("name", ""), "characters": len(d.get("content") or "")}
+            for d in self.config.knowledge_documents or []
+        ]
+
+    def add_knowledge_document(self, name: str, content: str) -> list:
+        """Add or replace an uploaded knowledge document and persist it."""
+        docs = [d for d in self.config.knowledge_documents or [] if d.get("name") != name]
+        docs.append({"name": name, "content": content})
+        self.config.knowledge_documents = docs
+        self._save_config()
+        logger.info(f"Knowledge document saved: {name} ({len(content)} chars)")
+        return self.list_knowledge_documents()
+
+    def remove_knowledge_document(self, name: str) -> bool:
+        """Remove an uploaded knowledge document by file name."""
+        docs = self.config.knowledge_documents or []
+        kept = [d for d in docs if d.get("name") != name]
+        if len(kept) == len(docs):
+            return False
+        self.config.knowledge_documents = kept
+        self._save_config()
+        logger.info(f"Knowledge document removed: {name}")
+        return True`,
 
   'app/services/call_manager.py': `"""
 Call Manager Service - Handles call lifecycle
@@ -1372,152 +1534,492 @@ class CallManager:
 `,
 
   'app/api/routes.py': `"""
-API Routes - All endpoint definitions
+API Routes - All endpoint definitions for the AI Receptionist Hub
 """
 
 import uuid
 from datetime import datetime
 from typing import Optional, List
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from loguru import logger
 
-from app.models.schemas import AgentConfig, AgentResponse, CallContext, CallLog, AutomationRule, Workflow
+from app.models.schemas import (
+    AgentConfig, AgentResponse, CallContext, CallLog,
+    AutomationRule, Workflow, DashboardStats, TelephonyConfig,
+    AIModelConfig, TeamMember, WSMessage
+)
 
+# ---- Agent Router ----
 agent_router = APIRouter()
+
 
 @agent_router.get("/config")
 async def get_agent_config(request: Request):
-    return request.app.state.ai_agent.get_config()
+    """Get current agent configuration"""
+    agent = request.app.state.ai_agent
+    return agent.get_config()
+
 
 @agent_router.put("/config")
 async def update_agent_config(request: Request, config: dict):
-    return {"status": "success", "config": request.app.state.ai_agent.update_config(config)}
+    """Update agent configuration"""
+    agent = request.app.state.ai_agent
+    updated = agent.update_config(config)
+    return {"status": "success", "config": updated}
+
+
+# ---- Knowledge documents: .md/.txt files the agent answers from ----
+
+_KNOWLEDGE_EXTENSIONS = (".md", ".markdown", ".txt")
+_KNOWLEDGE_MAX_BYTES = 200_000
+
+
+@agent_router.get("/knowledge/documents")
+async def list_knowledge_documents(request: Request):
+    """List uploaded knowledge documents (names and sizes)."""
+    agent = request.app.state.ai_agent
+    return {"documents": agent.list_knowledge_documents()}
+
+
+@agent_router.post("/knowledge/upload")
+async def upload_knowledge_document(request: Request, file: UploadFile = File(...)):
+    """Upload a knowledge file (.md, .markdown or .txt). The agent
+    answers questions from its contents, together with the rest of
+    the knowledge base. Re-uploading the same file name replaces it."""
+    name = (file.filename or "").strip()
+    if not name.lower().endswith(_KNOWLEDGE_EXTENSIONS):
+        raise HTTPException(status_code=400, detail="Only .md, .markdown or .txt files are accepted")
+    raw = await file.read()
+    if len(raw) > _KNOWLEDGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="File is too large (max 200 KB)")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 text")
+    agent = request.app.state.ai_agent
+    documents = agent.add_knowledge_document(name, content)
+    return {"status": "success", "documents": documents}
+
+
+@agent_router.delete("/knowledge/documents/{name}")
+async def delete_knowledge_document(request: Request, name: str):
+    """Remove an uploaded knowledge document by file name."""
+    agent = request.app.state.ai_agent
+    if not agent.remove_knowledge_document(name):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "success", "documents": agent.list_knowledge_documents()}
+
 
 @agent_router.post("/chat")
 async def chat_with_agent(request: Request, data: dict):
+    """Send a message to the AI agent and get a response"""
     agent = request.app.state.ai_agent
     call_id = data.get("call_id", str(uuid.uuid4()))
     message = data.get("message", "")
+    
     if not message:
-        raise HTTPException(status_code=400, detail="Message required")
-    return await agent.process_message(call_id, message)
+        raise HTTPException(status_code=400, detail="Message is required")
+    
+    response = await agent.process_message(call_id, message)
+    return response
+
 
 @agent_router.post("/call/start")
 async def start_call(request: Request, data: Optional[dict] = None):
+    """Start a new call session"""
     call_manager = request.app.state.call_manager
     data = data or {}
-    call = await call_manager.start_call(data.get("caller_number"), data.get("caller_name"))
-    greeting = request.app.state.ai_agent.get_config().greeting
-    return {"call_id": call.call_id, "status": call.status, "greeting": greeting}
+    call = await call_manager.start_call(
+        caller_number=data.get("caller_number"),
+        caller_name=data.get("caller_name")
+    )
+    
+    # Get greeting from agent
+    agent = request.app.state.ai_agent
+    greeting = agent.get_config().greeting
+    
+    return {
+        "call_id": call.call_id,
+        "status": call.status,
+        "greeting": greeting,
+        "started_at": call.started_at.isoformat()
+    }
+
 
 @agent_router.post("/call/{call_id}/end")
 async def end_call(request: Request, call_id: str):
-    log = await request.app.state.call_manager.end_call(call_id)
-    request.app.state.ai_agent.end_call(call_id)
-    farewell = request.app.state.ai_agent.get_config().farewell
-    return {"status": "ended", "call_log": log, "farewell": farewell}
+    """End an active call"""
+    call_manager = request.app.state.call_manager
+    agent = request.app.state.ai_agent
+    
+    log = await call_manager.end_call(call_id)
+    agent.end_call(call_id)
+    
+    farewell = agent.get_config().farewell
+    return {
+        "status": "ended",
+        "call_log": log,
+        "farewell": farewell
+    }
 
+
+# ---- Automation Router ----
 automation_router = APIRouter()
 
+# In-memory automation rules (in production, use database)
 _automation_rules = [
-    AutomationRule(id=1, name="After Hours Routing", trigger="Call outside business hours", action="Play message + callback", enabled=True, priority=1),
-    AutomationRule(id=2, name="Appointment Booking", trigger="Intent: Appointment", action="Collect details → Confirm → SMS", enabled=True, priority=2),
-    AutomationRule(id=3, name="Emergency Escalation", trigger="Keywords: emergency, urgent", action="Transfer to on-call staff", enabled=True, priority=0),
+    AutomationRule(id=1, name="After Hours Routing", trigger="Call outside business hours", action="Play recorded message + offer callback", enabled=True, priority=1),
+    AutomationRule(id=2, name="Appointment Booking", trigger="Intent: Appointment", action="Collect date/time → Confirm → Send SMS", enabled=True, priority=2),
+    AutomationRule(id=3, name="Emergency Escalation", trigger="Keywords: emergency, urgent, help", action="Immediately transfer to on-call staff", enabled=True, priority=0),
+    AutomationRule(id=4, name="VIP Caller Detection", trigger="Caller ID matches VIP list", action="Skip queue → Transfer to manager", enabled=False, priority=1),
+    AutomationRule(id=5, name="Survey Collection", trigger="Call resolved successfully", action="Ask for satisfaction rating 1-5", enabled=True, priority=5),
+    AutomationRule(id=6, name="Voicemail Fallback", trigger="No agent available after 30s", action="Offer voicemail + email notification", enabled=True, priority=4),
 ]
 
+_workflows = [
+    Workflow(id=1, name="New Customer Onboarding", steps=5, status="active", calls=234),
+    Workflow(id=2, name="Appointment Reminder", steps=3, status="active", calls=567),
+    Workflow(id=3, name="Payment Collection", steps=4, status="paused", calls=89),
+    Workflow(id=4, name="Feedback Survey", steps=2, status="active", calls=1023),
+]
+
+
 @automation_router.get("/rules")
-async def get_rules():
+async def get_automation_rules():
+    """Get all automation rules"""
     return sorted(_automation_rules, key=lambda r: r.priority)
 
+
 @automation_router.post("/rules")
-async def create_rule(rule: dict):
-    new_rule = AutomationRule(id=len(_automation_rules) + 1, name=rule.get("name", ""), trigger=rule.get("trigger", ""), action=rule.get("action", ""), enabled=True, priority=len(_automation_rules) + 1)
+async def create_automation_rule(rule: dict):
+    """Create a new automation rule"""
+    new_rule = AutomationRule(
+        id=len(_automation_rules) + 1,
+        name=rule.get("name", ""),
+        trigger=rule.get("trigger", ""),
+        action=rule.get("action", ""),
+        enabled=True,
+        priority=len(_automation_rules) + 1
+    )
     _automation_rules.append(new_rule)
     return new_rule
 
+
 @automation_router.put("/rules/{rule_id}/toggle")
 async def toggle_rule(rule_id: int):
+    """Toggle an automation rule on/off"""
     for rule in _automation_rules:
         if rule.id == rule_id:
             rule.enabled = not rule.enabled
             return {"status": "success", "rule": rule}
     raise HTTPException(status_code=404, detail="Rule not found")
 
+
 @automation_router.delete("/rules/{rule_id}")
 async def delete_rule(rule_id: int):
+    """Delete an automation rule"""
     global _automation_rules
     _automation_rules = [r for r in _automation_rules if r.id != rule_id]
     return {"status": "deleted"}
 
+
+@automation_router.get("/workflows")
+async def get_workflows():
+    """Get all workflows"""
+    return _workflows
+
+
+@automation_router.put("/workflows/{wf_id}/toggle")
+async def toggle_workflow(wf_id: int):
+    """Toggle a workflow"""
+    for wf in _workflows:
+        if wf.id == wf_id:
+            wf.status = "paused" if wf.status == "active" else "active"
+            return {"status": "success", "workflow": wf}
+    raise HTTPException(status_code=404, detail="Workflow not found")
+
+
+# ---- Calls Router ----
 calls_router = APIRouter()
+
 
 @calls_router.get("/active")
 async def get_active_calls(request: Request):
-    return await request.app.state.call_manager.get_active_calls()
+    """Get all active calls"""
+    call_manager = request.app.state.call_manager
+    calls = await call_manager.get_active_calls()
+    return calls
+
 
 @calls_router.get("/history")
-async def get_history(request: Request, limit: int = 50):
-    return await request.app.state.call_manager.get_call_history(limit)
+async def get_call_history(request: Request, limit: int = 50):
+    """Get call history"""
+    call_manager = request.app.state.call_manager
+    history = await call_manager.get_call_history(limit)
+    return history
+
 
 @calls_router.get("/stats")
-async def get_stats(request: Request):
-    return await request.app.state.call_manager.get_call_stats()
+async def get_call_stats(request: Request):
+    """Get call statistics"""
+    call_manager = request.app.state.call_manager
+    stats = await call_manager.get_call_stats()
+    return stats
 
+
+@calls_router.post("/{call_id}/transfer")
+async def transfer_call(request: Request, call_id: str, data: dict):
+    """Transfer a call"""
+    call_manager = request.app.state.call_manager
+    target = data.get("target", "general")
+    success = await call_manager.transfer_call(call_id, target)
+    return {"success": success, "target": target}
+
+
+@calls_router.post("/{call_id}/hold")
+async def hold_call(request: Request, call_id: str):
+    """Put a call on hold"""
+    call_manager = request.app.state.call_manager
+    success = await call_manager.hold_call(call_id)
+    return {"success": success}
+
+
+# ---- Analytics Router ----
 analytics_router = APIRouter()
 
+
 @analytics_router.get("/dashboard")
-async def get_dashboard(request: Request):
-    stats = await request.app.state.call_manager.get_call_stats()
-    return {"total_calls": stats.get("total_calls", 1247), "calls_handled": stats.get("resolved", 1189), "avg_response_time": 1.2, "satisfaction_rate": 94.7}
+async def get_dashboard_stats(request: Request):
+    """Get dashboard statistics"""
+    call_manager = request.app.state.call_manager
+    stats = await call_manager.get_call_stats()
+    
+    return {
+        "total_calls": stats.get("total_calls", 1247),
+        "calls_handled": stats.get("resolved", 1189),
+        "avg_response_time": 1.2,
+        "satisfaction_rate": 94.7,
+        "resolution_rate": stats.get("resolution_rate", 95.3),
+        "transfer_rate": stats.get("transfer_rate", 4.7),
+    }
+
 
 @analytics_router.get("/hourly")
-async def get_hourly():
-    return [{"hour": "9AM", "calls": 45}, {"hour": "10AM", "calls": 67}, {"hour": "11AM", "calls": 54}]
+async def get_hourly_distribution():
+    """Get hourly call distribution"""
+    return [
+        {"hour": "8AM", "calls": 12}, {"hour": "9AM", "calls": 45},
+        {"hour": "10AM", "calls": 67}, {"hour": "11AM", "calls": 54},
+        {"hour": "12PM", "calls": 38}, {"hour": "1PM", "calls": 42},
+        {"hour": "2PM", "calls": 58}, {"hour": "3PM", "calls": 49},
+        {"hour": "4PM", "calls": 36}, {"hour": "5PM", "calls": 28},
+        {"hour": "6PM", "calls": 15}, {"hour": "7PM", "calls": 8},
+    ]
 
+
+@analytics_router.get("/intents")
+async def get_intent_distribution():
+    """Get intent distribution"""
+    return [
+        {"name": "Appointment Booking", "count": 423, "percentage": 34},
+        {"name": "General Inquiry", "count": 312, "percentage": 25},
+        {"name": "Business Hours", "count": 187, "percentage": 15},
+        {"name": "Technical Support", "count": 156, "percentage": 13},
+        {"name": "Complaints", "count": 89, "percentage": 7},
+        {"name": "Other", "count": 80, "percentage": 6},
+    ]
+
+
+# ---- Settings Router ----
 settings_router = APIRouter()
 
+
 @settings_router.get("/general")
-async def get_general():
-    return {"system_name": "AI Receptionist Hub", "timezone": "America/New_York", "enable_notifications": True}
+async def get_general_settings():
+    """Get general settings"""
+    return {
+        "system_name": "AI Receptionist Hub",
+        "timezone": "America/New_York",
+        "date_format": "MM/DD/YYYY",
+        "enable_notifications": True,
+        "enable_call_recording": True,
+        "enable_transcripts": True,
+        "auto_save_transcripts": True,
+    }
+
 
 @settings_router.put("/general")
-async def update_general(data: dict):
+async def update_general_settings(data: dict):
+    """Update general settings"""
     return {"status": "success", "settings": data}
 
-@settings_router.get("/team")
-async def get_team():
-    return [{"id": 1, "name": "Alex Thompson", "role": "Admin", "email": "alex@techcorp.com", "status": "active"}]
 
+@settings_router.get("/telephony")
+async def get_telephony_settings():
+    """Get telephony settings"""
+    return {
+        "provider": "twilio",
+        "account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "phone_number": "+1 (555) 123-4567",
+        "max_concurrent_calls": 10,
+        "enable_sip": False,
+    }
+
+
+@settings_router.put("/telephony")
+async def update_telephony_settings(data: dict):
+    """Update telephony settings"""
+    return {"status": "success", "settings": data}
+
+
+@settings_router.get("/ai-model")
+async def get_ai_model_settings():
+    """Get AI model settings"""
+    return {
+        "provider": "openai",
+        "model": "gpt-4-turbo-preview",
+        "temperature": 0.7,
+        "max_tokens": 500,
+        "enable_function_calling": True,
+        "enable_memory": True,
+    }
+
+
+@settings_router.put("/ai-model")
+async def update_ai_model_settings(data: dict):
+    """Update AI model settings"""
+    return {"status": "success", "settings": data}
+
+
+@settings_router.get("/team")
+async def get_team_members():
+    """Get team members"""
+    return [
+        {"id": 1, "name": "Alex Thompson", "role": "Admin", "email": "alex@techcorp.com", "status": "active"},
+        {"id": 2, "name": "Maria Garcia", "role": "Manager", "email": "maria@techcorp.com", "status": "active"},
+        {"id": 3, "name": "James Wilson", "role": "Agent", "email": "james@techcorp.com", "status": "active"},
+        {"id": 4, "name": "Sophie Brown", "role": "Agent", "email": "sophie@techcorp.com", "status": "inactive"},
+    ]
+
+
+@settings_router.get("/api-keys")
+async def get_api_keys():
+    """Get API keys (masked)"""
+    return [
+        {"name": "Production API Key", "key": "pk_live_••••••••••••••••••••", "created": "2024-01-01", "status": "active"},
+        {"name": "Development API Key", "key": "pk_test_••••••••••••••••••••", "created": "2024-01-05", "status": "active"},
+        {"name": "Webhook Secret", "key": "whsec_••••••••••••••••••••", "created": "2024-01-01", "status": "active"},
+    ]
+
+
+# ---- Webhooks Router ----
 webhooks_router = APIRouter()
+
 
 @webhooks_router.post("/twilio")
 async def twilio_webhook(request: Request):
+    """Handle incoming Twilio webhooks"""
     form = await request.form()
-    twiml = """<?xml version="1.0" encoding="UTF-8"?>
+    call_sid = form.get("CallSid", "")
+    caller = form.get("From", "")
+    
+    logger.info(f"Twilio webhook: Call from {caller}, SID: {call_sid}")
+    
+    # Return TwiML response
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Hello! I'm Aria, your AI assistant. How can I help?</Say>
-    <Gather input="speech" action="/webhooks/twilio/gather" method="POST" timeout="5"/>
+    <Say>Hello! Thank you for calling. I'm Aria, your AI assistant. How can I help you today?</Say>
+    <Gather input="speech" action="/webhooks/twilio/gather" method="POST" timeout="5">
+        <Say>Please tell me what you need help with.</Say>
+    </Gather>
 </Response>"""
+    
     from fastapi.responses import Response
     return Response(content=twiml, media_type="application/xml")
 
+
+@webhooks_router.post("/twilio/gather")
+async def twilio_gather(request: Request):
+    """Handle gathered speech from Twilio"""
+    form = await request.form()
+    speech_result = form.get("SpeechResult", "")
+    call_sid = form.get("CallSid", "")
+    
+    logger.info(f"Twilio gather: {speech_result}")
+    
+    # Process with AI agent
+    agent = request.app.state.ai_agent
+    response = await agent.process_message(call_sid, speech_result)
+    
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>{response.message}</Say>
+    <Gather input="speech" action="/webhooks/twilio/gather" method="POST" timeout="5">
+        <Say>Is there anything else I can help you with?</Say>
+    </Gather>
+</Response>"""
+    
+    from fastapi.responses import Response
+    return Response(content=twiml, media_type="application/xml")
+
+
+# ---- WebSocket Router ----
 websocket_router = APIRouter()
+
 
 @websocket_router.websocket("/call/{call_id}")
 async def websocket_call(websocket: WebSocket, call_id: str):
+    """WebSocket endpoint for real-time call interaction"""
     await websocket.accept()
+    logger.info(f"WebSocket connected for call: {call_id}")
+    
     try:
         while True:
             data = await websocket.receive_json()
-            if data.get("type") == "text":
+            msg_type = data.get("type", "text")
+            
+            if msg_type == "text":
+                # Process text message through AI agent
                 agent = websocket.app.state.ai_agent
-                response = await agent.process_message(call_id, data.get("data", {}).get("message", ""))
-                await websocket.send_json({"type": "response", "data": {"message": response.message, "intent": response.intent}, "call_id": call_id})
-            elif data.get("type") == "end_call":
-                await websocket.app.state.call_manager.end_call(call_id)
-                await websocket.send_json({"type": "status", "data": {"message": "Call ended"}, "call_id": call_id})
+                message = data.get("data", {}).get("message", "")
+                
+                response = await agent.process_message(call_id, message)
+                
+                await websocket.send_json({
+                    "type": "response",
+                    "data": {
+                        "message": response.message,
+                        "intent": response.intent,
+                        "confidence": response.confidence,
+                    },
+                    "call_id": call_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            
+            elif msg_type == "audio":
+                # Handle audio data (speech-to-text would go here)
+                await websocket.send_json({
+                    "type": "status",
+                    "data": {"message": "Audio received, processing..."},
+                    "call_id": call_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            
+            elif msg_type == "end_call":
+                call_manager = websocket.app.state.call_manager
+                await call_manager.end_call(call_id)
+                
+                await websocket.send_json({
+                    "type": "status",
+                    "data": {"message": "Call ended"},
+                    "call_id": call_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
                 break
+                
     except WebSocketDisconnect:
-        pass
-`,
+        logger.info(f"WebSocket disconnected for call: {call_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error for call {call_id}: {e}")
+        await websocket.close()`,
 };

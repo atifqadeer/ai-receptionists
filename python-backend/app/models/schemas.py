@@ -65,6 +65,10 @@ class AgentConfig(BaseModel):
     allow_interrupts: bool = True
     knowledge_base: Dict[str, str] = {}
     faqs: List[Dict[str, str]] = []
+    # Uploaded knowledge documents (.md/.txt files from Agent Setup).
+    # Each item: {"name": filename, "content": full text of the file}.
+    # The agent answers from these together with knowledge_base.
+    knowledge_documents: List[Dict[str, str]] = []
 
 
 # ---- Call Models ----

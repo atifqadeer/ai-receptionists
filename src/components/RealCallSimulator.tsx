@@ -64,6 +64,7 @@ export default function RealCallSimulator() {
     address: '',
     services: 'Web Development, Mobile Apps, Cloud Solutions',
     companyInfo: '',
+    documents: [] as Array<{ name: string; content: string }>,
     faqs: [] as Array<{ q: string; a: string }>,
   });
 
@@ -155,24 +156,62 @@ export default function RealCallSimulator() {
     return 'General Inquiry';
   }, [knowledge.faqs]);
 
-  // Free-form Company Knowledge from Agent Setup: the agent answers
-  // company questions from that text, passage by passage (one fact per
-  // line; long lines split into sentences).
+  // The free-form knowledge from Agent Setup (Company Knowledge text +
+  // uploaded .md documents), split into searchable passages: one fact
+  // per line; long lines split into sentences; Markdown cleaned;
+  // table rows become "Header: value." passages.
+  const kbPassages = (info: string): string[] => {
+    const clean = (s: string) => s
+      .replace(/^#+\s*/, '')
+      .replace(/^\s*>\s?/, '')
+      .replace(/^[\s\-•*]+|[\s\-•*]+$/g, '')
+      .replace(/\*\*/g, '')
+      .replace(/__/g, '')
+      .trim();
+    const cells = (s: string) => s.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean);
+    const lines = (info || '').split('\n');
+    const out: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const raw = lines[i];
+      if (raw.includes('|') && i + 1 < lines.length && lines[i + 1].includes('-') && /^[|:\-\s]+$/.test(lines[i + 1].trim())) {
+        const header = cells(raw).map(clean);
+        i += 2;
+        while (i < lines.length && lines[i].includes('|')) {
+          const row = cells(lines[i]).map(clean);
+          if (header.length && row.length === header.length) {
+            out.push(header.map((h, j) => `${h}: ${row[j]}`).join('. ') + '.');
+          } else if (row.length) {
+            out.push(row.join(' — '));
+          }
+          i++;
+        }
+        continue;
+      }
+      const line0 = raw.trim();
+      i++;
+      if (!line0 || /^[|:\-\s]+$/.test(line0)) continue;
+      let line = clean(line0);
+      if (line.includes('|')) line = line.replace(/\s*\|\s*/g, ' — ').replace(/^[—\s]+|[—\s]+$/g, '').trim();
+      if (!line) continue;
+      if (line.length > 220) {
+        line.split(/(?<=[.!?])\s+/).forEach(p => { if (p.trim().length > 15) out.push(p.trim()); });
+      } else {
+        out.push(line);
+      }
+    }
+    return out;
+  };
+
+  // Free-form knowledge from Agent Setup: the agent answers company
+  // questions from that knowledge, passage by passage.
   const findCompanyInfoAnswer = (text: string): string | null => {
     const stop = new Set(['what', 'when', 'where', 'which', 'your', 'yours', 'about', 'there', 'their', 'this', 'that', 'with', 'have', 'does', 'will', 'would', 'could', 'should', 'please', 'thanks', 'thank']);
     const sig = (t: string) => t.toLowerCase().split(/[^a-z0-9]+/)
       .filter(w => w.length > 3 && !stop.has(w))
       .map(w => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
-    const passages: string[] = [];
-    for (const raw of (knowledge.companyInfo ?? '').split('\n')) {
-      const line = raw.replace(/^[\s\-•*]+/, '').trim();
-      if (!line) continue;
-      if (line.length > 220) {
-        line.split(/(?<=[.!?])\s+/).forEach(p => { if (p.trim().length > 15) passages.push(p.trim()); });
-      } else {
-        passages.push(line);
-      }
-    }
+    const combined = [knowledge.companyInfo ?? '', ...(knowledge.documents ?? []).map(d => d.content)].join('\n');
+    const passages = kbPassages(combined);
     if (passages.length === 0) return null;
     const lower = text.toLowerCase();
     if ((lower.includes('about') && (lower.includes('company') || lower.includes('business')))

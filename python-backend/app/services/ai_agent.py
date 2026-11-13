@@ -130,6 +130,9 @@ FAQs:
 COMPANY KNOWLEDGE (the main source for questions about the company — its history, policies, prices, delivery, warranty and anything else written here):
 {kb.get('company_info', '') or 'N/A'}
 
+KNOWLEDGE DOCUMENTS (uploaded files; answer from them exactly as from the company knowledge above):
+{chr(10).join([f"--- {d.get('name', 'document')} ---" + chr(10) + (d.get('content') or '') for d in config.knowledge_documents]) or 'None uploaded.'}
+
 RULES:
 1. Always greet the caller warmly
 2. Listen carefully and identify the caller's intent
@@ -270,11 +273,46 @@ AVAILABLE INTENTS:
         """Split free-form company knowledge into searchable passages.
 
         Structure the agent reads: one fact per line; a long line is
-        split into its sentences; blank lines separate topics.
+        split into its sentences; blank lines separate topics. Markdown
+        is cleaned so answers read as plain speech: heading markers,
+        bold markers, bullets and table pipes are removed, and table
+        separator rows are dropped.
         """
-        passages = []
-        for line in (text or "").splitlines():
+        def clean(line: str) -> str:
+            line = re.sub(r"^#+\s*", "", line.strip())   # heading markers
+            line = re.sub(r"^\s*>\s?", "", line)         # quote marker
             line = line.strip(" \t-•*")
+            return line.replace("**", "").replace("__", "").strip()
+
+        def cells(line: str) -> list:
+            return [c.strip() for c in line.strip().strip("|").split("|") if c.strip()]
+
+        lines = (text or "").splitlines()
+        passages = []
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            # Markdown table: a header row followed by a |---|---| row.
+            # Each data row becomes "Header: value. Header: value." so a
+            # question naming either column can match and be answered.
+            if "|" in raw and i + 1 < len(lines) and "-" in lines[i + 1] and re.fullmatch(r"[|:\-\s]+", lines[i + 1].strip()):
+                header = [clean(c) for c in cells(raw)]
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    row = [clean(c) for c in cells(lines[i])]
+                    if header and len(row) == len(header):
+                        passages.append(". ".join(f"{h}: {c}" for h, c in zip(header, row)) + ".")
+                    elif row:
+                        passages.append(" — ".join(row))
+                    i += 1
+                continue
+            line = raw.strip()
+            i += 1
+            if not line or re.fullmatch(r"[|:\-\s]+", line):
+                continue  # blank, table separator row or horizontal rule
+            line = clean(line)
+            if "|" in line:                              # stray table row
+                line = re.sub(r"\s*\|\s*", " — ", line).strip(" —")
             if not line:
                 continue
             if len(line) > 220:
@@ -284,13 +322,26 @@ AVAILABLE INTENTS:
                 passages.append(line)
         return passages
 
-    def _company_info_lookup(self, message: str, msg_words: set) -> Optional[tuple]:
-        """Answer from the free-form company knowledge text, if it matches."""
+    def _knowledge_sources(self) -> list:
+        """All free-form knowledge the agent answers from, in order:
+        the Company Knowledge text first, then each uploaded document."""
         kb = self.config.knowledge_base or {}
+        sources = []
         info = (kb.get("company_info") or "").strip()
-        if not info:
-            return None
-        passages = self._kb_passages(info)
+        if info:
+            sources.append(info)
+        for doc in self.config.knowledge_documents or []:
+            content = (doc.get("content") or "").strip()
+            if content:
+                sources.append(content)
+        return sources
+
+    def _company_info_lookup(self, message: str, msg_words: set) -> Optional[tuple]:
+        """Answer from the free-form company knowledge — the Company
+        Knowledge text plus every uploaded knowledge document."""
+        passages = []
+        for source in self._knowledge_sources():
+            passages.extend(self._kb_passages(source))
         if not passages:
             return None
 
@@ -465,3 +516,32 @@ Return only the category name, nothing else."""
     def get_config(self) -> AgentConfig:
         """Get current agent configuration"""
         return self.config
+
+    # ---- Knowledge documents (.md/.txt uploads from Agent Setup) ----
+
+    def list_knowledge_documents(self) -> list:
+        """Uploaded knowledge documents (names and sizes, not content)."""
+        return [
+            {"name": d.get("name", ""), "characters": len(d.get("content") or "")}
+            for d in self.config.knowledge_documents or []
+        ]
+
+    def add_knowledge_document(self, name: str, content: str) -> list:
+        """Add or replace an uploaded knowledge document and persist it."""
+        docs = [d for d in self.config.knowledge_documents or [] if d.get("name") != name]
+        docs.append({"name": name, "content": content})
+        self.config.knowledge_documents = docs
+        self._save_config()
+        logger.info(f"Knowledge document saved: {name} ({len(content)} chars)")
+        return self.list_knowledge_documents()
+
+    def remove_knowledge_document(self, name: str) -> bool:
+        """Remove an uploaded knowledge document by file name."""
+        docs = self.config.knowledge_documents or []
+        kept = [d for d in docs if d.get("name") != name]
+        if len(kept) == len(docs):
+            return False
+        self.config.knowledge_documents = kept
+        self._save_config()
+        logger.info(f"Knowledge document removed: {name}")
+        return True

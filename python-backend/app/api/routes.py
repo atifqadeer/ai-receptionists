@@ -5,7 +5,7 @@ API Routes - All endpoint definitions for the AI Receptionist Hub
 import uuid
 from datetime import datetime
 from typing import Optional, List
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from loguru import logger
 
 from app.models.schemas import (
@@ -31,6 +31,48 @@ async def update_agent_config(request: Request, config: dict):
     agent = request.app.state.ai_agent
     updated = agent.update_config(config)
     return {"status": "success", "config": updated}
+
+
+# ---- Knowledge documents: .md/.txt files the agent answers from ----
+
+_KNOWLEDGE_EXTENSIONS = (".md", ".markdown", ".txt")
+_KNOWLEDGE_MAX_BYTES = 200_000
+
+
+@agent_router.get("/knowledge/documents")
+async def list_knowledge_documents(request: Request):
+    """List uploaded knowledge documents (names and sizes)."""
+    agent = request.app.state.ai_agent
+    return {"documents": agent.list_knowledge_documents()}
+
+
+@agent_router.post("/knowledge/upload")
+async def upload_knowledge_document(request: Request, file: UploadFile = File(...)):
+    """Upload a knowledge file (.md, .markdown or .txt). The agent
+    answers questions from its contents, together with the rest of
+    the knowledge base. Re-uploading the same file name replaces it."""
+    name = (file.filename or "").strip()
+    if not name.lower().endswith(_KNOWLEDGE_EXTENSIONS):
+        raise HTTPException(status_code=400, detail="Only .md, .markdown or .txt files are accepted")
+    raw = await file.read()
+    if len(raw) > _KNOWLEDGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="File is too large (max 200 KB)")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 text")
+    agent = request.app.state.ai_agent
+    documents = agent.add_knowledge_document(name, content)
+    return {"status": "success", "documents": documents}
+
+
+@agent_router.delete("/knowledge/documents/{name}")
+async def delete_knowledge_document(request: Request, name: str):
+    """Remove an uploaded knowledge document by file name."""
+    agent = request.app.state.ai_agent
+    if not agent.remove_knowledge_document(name):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "success", "documents": agent.list_knowledge_documents()}
 
 
 @agent_router.post("/chat")

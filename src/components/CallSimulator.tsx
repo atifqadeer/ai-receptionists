@@ -42,6 +42,7 @@ export default function CallSimulator() {
     address: '',
     services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
     companyInfo: '',
+    documents: [] as Array<{ name: string; content: string }>,
     faqs: [] as Array<{ q: string; a: string }>,
   });
 
@@ -127,13 +128,44 @@ export default function CallSimulator() {
       // Light stemming: simple plurals match their singular form.
       .map(w => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
 
-  // The free-form Company Knowledge text from Agent Setup, split into
-  // the passages the agent searches: one fact per line; a long line is
-  // split into sentences.
+  // The free-form knowledge from Agent Setup (Company Knowledge text +
+  // uploaded .md documents), split into the passages the agent
+  // searches: one fact per line; long lines split into sentences;
+  // Markdown headings/bold/bullets cleaned; table rows become
+  // "Header: value." passages so either column can be asked about.
   const kbPassages = (info: string): string[] => {
+    const clean = (s: string) => s
+      .replace(/^#+\s*/, '')
+      .replace(/^\s*>\s?/, '')
+      .replace(/^[\s\-•*]+|[\s\-•*]+$/g, '')
+      .replace(/\*\*/g, '')
+      .replace(/__/g, '')
+      .trim();
+    const cells = (s: string) => s.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean);
+    const lines = (info || '').split('\n');
     const out: string[] = [];
-    for (const raw of (info || '').split('\n')) {
-      const line = raw.replace(/^[\s\-•*]+/, '').trim();
+    let i = 0;
+    while (i < lines.length) {
+      const raw = lines[i];
+      if (raw.includes('|') && i + 1 < lines.length && lines[i + 1].includes('-') && /^[|:\-\s]+$/.test(lines[i + 1].trim())) {
+        const header = cells(raw).map(clean);
+        i += 2;
+        while (i < lines.length && lines[i].includes('|')) {
+          const row = cells(lines[i]).map(clean);
+          if (header.length && row.length === header.length) {
+            out.push(header.map((h, j) => `${h}: ${row[j]}`).join('. ') + '.');
+          } else if (row.length) {
+            out.push(row.join(' — '));
+          }
+          i++;
+        }
+        continue;
+      }
+      const line0 = raw.trim();
+      i++;
+      if (!line0 || /^[|:\-\s]+$/.test(line0)) continue;
+      let line = clean(line0);
+      if (line.includes('|')) line = line.replace(/\s*\|\s*/g, ' — ').replace(/^[—\s]+|[—\s]+$/g, '').trim();
       if (!line) continue;
       if (line.length > 220) {
         line.split(/(?<=[.!?])\s+/).forEach(p => { if (p.trim().length > 15) out.push(p.trim()); });
@@ -143,6 +175,9 @@ export default function CallSimulator() {
     }
     return out;
   };
+
+  const combinedKnowledge = () =>
+    [knowledge.companyInfo ?? '', ...(knowledge.documents ?? []).map(d => d.content)].join('\n');
 
   const findKbAnswer = (text: string): { text: string; intent: string } | null => {
     const lower = text.toLowerCase();
@@ -168,9 +203,10 @@ export default function CallSimulator() {
     if (lower.includes('email') && knowledge.email) {
       return { text: `Our email address is ${knowledge.email}.`, intent: 'General Inquiry' };
     }
-    // Free-form Company Knowledge from Agent Setup: any other company
-    // question is answered from that text, passage by passage.
-    const passages = kbPassages(knowledge.companyInfo ?? '');
+    // Free-form knowledge from Agent Setup (Company Knowledge text +
+    // uploaded documents): any other company question is answered
+    // from that knowledge, passage by passage.
+    const passages = kbPassages(combinedKnowledge());
     if (passages.length > 0) {
       if ((lower.includes('about') && (lower.includes('company') || lower.includes('business')))
         || lower.includes('who are you') || lower.includes('your company') || lower.includes('your business')) {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import VoicePreview from './VoicePreview';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
@@ -34,6 +34,7 @@ export default function SetupForm() {
     email: 'support@techcorp.com',
     services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
     companyInfo: 'TechCorp Solutions is a software company based in San Francisco, California.\nWe build web applications, mobile apps, cloud solutions and AI integrations for startups and enterprises.\nOur team has more than 40 engineers, designers and project managers.\nWe offer a free 30-minute consultation for every new project.\nA basic business website starts at $2,500; full project pricing depends on the scope.\nEvery project includes 3 months of free support after launch.\nTo start a project, email support@techcorp.com or call +1 (555) 123-4567.',
+    documents: [] as Array<{ name: string; content: string }>,
     faqs: [
       { q: 'What are your business hours?', a: 'We are open Monday to Friday, 9 AM to 6 PM EST.' },
       { q: 'How do I book an appointment?', a: 'I can help you book an appointment right now. What date and time works best for you?' },
@@ -45,6 +46,39 @@ export default function SetupForm() {
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
+
+  // Knowledge file uploads (.md): file contents become part of the
+  // knowledge base the agent answers from.
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [docError, setDocError] = useState('');
+
+  const handleKnowledgeFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setDocError('');
+    const accepted: Array<{ name: string; content: string }> = [];
+    const rejected: string[] = [];
+    for (const file of Array.from(files)) {
+      if (!/\.(md|markdown|txt)$/i.test(file.name)) { rejected.push(file.name); continue; }
+      if (file.size > 200_000) { rejected.push(`${file.name} (over 200 KB)`); continue; }
+      accepted.push({ name: file.name, content: await file.text() });
+    }
+    if (accepted.length > 0) {
+      setKnowledge((prev) => {
+        const docs = [...(prev.documents ?? [])];
+        for (const doc of accepted) {
+          const idx = docs.findIndex((d) => d.name === doc.name);
+          if (idx >= 0) docs[idx] = doc; else docs.push(doc);
+        }
+        return { ...prev, documents: docs };
+      });
+    }
+    if (rejected.length > 0) {
+      setDocError(`Skipped: ${rejected.join(', ')} — only .md, .markdown or .txt files up to 200 KB are accepted.`);
+    }
+  };
+
+  const removeDocument = (name: string) =>
+    setKnowledge((prev) => ({ ...prev, documents: (prev.documents ?? []).filter((d) => d.name !== name) }));
 
   const tabs = [
     { id: 'identity', label: 'Identity & Voice', icon: 'fa-id-badge' },
@@ -384,6 +418,69 @@ export default function SetupForm() {
               <i className="fa-solid fa-circle-info"></i>
               Keep each fact on its own line — the agent finds the line that matches the caller's question and answers with it word for word. Remember to press Save Configuration below.
             </p>
+          </div>
+
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                <i className="fa-solid fa-file-lines text-violet-400"></i>
+                Knowledge Files
+              </h3>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-sm hover:bg-violet-700 transition-all flex items-center gap-1"
+              >
+                <i className="fa-solid fa-upload text-xs"></i>
+                Upload .md file
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".md,.markdown,.txt"
+                multiple
+                className="hidden"
+                onChange={(e) => { handleKnowledgeFiles(e.target.files); e.target.value = ''; }}
+              />
+            </div>
+            <p className="text-sm text-gray-400 leading-relaxed">
+              Upload your knowledge files (<span className="text-gray-300">.md</span>, .markdown or .txt) — price lists,
+              policies, product details, anything in Markdown. The agent reads every file and answers caller
+              questions from them, together with the Company Knowledge text above. Headings, bullet lists and
+              tables are all fine. Uploading a file with the same name replaces the old one.
+            </p>
+            {docError && (
+              <p className="text-sm text-red-400 flex items-center gap-1.5">
+                <i className="fa-solid fa-triangle-exclamation"></i>
+                {docError}
+              </p>
+            )}
+            {(knowledge.documents ?? []).length === 0 ? (
+              <p className="text-sm text-gray-500 border border-dashed border-gray-700 rounded-lg px-4 py-5 text-center">
+                No knowledge files uploaded yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {(knowledge.documents ?? []).map((doc) => (
+                  <div key={doc.name} className="flex items-center justify-between px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50">
+                    <span className="flex items-center gap-2.5 text-sm text-gray-200 min-w-0">
+                      <i className="fa-solid fa-file-lines text-violet-400 shrink-0"></i>
+                      <span className="truncate">{doc.name}</span>
+                      <span className="text-xs text-gray-500 shrink-0">{(doc.content.length / 1024).toFixed(1)} KB</span>
+                    </span>
+                    <button
+                      onClick={() => removeDocument(doc.name)}
+                      className="text-gray-500 hover:text-red-400 transition-all shrink-0 ml-3"
+                      title={`Remove ${doc.name}`}
+                    >
+                      <i className="fa-solid fa-trash text-xs"></i>
+                    </button>
+                  </div>
+                ))}
+                <p className="text-xs text-gray-500">
+                  {(knowledge.documents ?? []).length} file(s) — the agent is answering from all of them.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="bg-gray-900 rounded-xl border border-gray-800 p-6">
