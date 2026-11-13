@@ -897,7 +897,22 @@ class AIAgent:
                 "address": "123 Innovation Drive, Suite 400, San Francisco, CA 94102",
                 "phone": "+1 (555) 123-4567",
                 "email": "support@techcorp.com",
-                "services": "Web Development, Mobile Apps, Cloud Solutions, AI Integration"
+                "services": "Web Development, Mobile Apps, Cloud Solutions, AI Integration",
+                # Free-form company knowledge, written in Agent Setup >
+                # Knowledge Base. Structure: one fact per line (or a short
+                # paragraph per topic, blank line between topics). The
+                # agent answers company questions from this text: it is
+                # searched passage-by-passage before the AI model is used,
+                # and it is also given to the model verbatim in the prompt.
+                "company_info": (
+                    "TechCorp Solutions is a software company based in San Francisco, California.\\n"
+                    "We build web applications, mobile apps, cloud solutions and AI integrations for startups and enterprises.\\n"
+                    "Our team has more than 40 engineers, designers and project managers.\\n"
+                    "We offer a free 30-minute consultation for every new project.\\n"
+                    "A basic business website starts at $2,500; full project pricing depends on the scope.\\n"
+                    "Every project includes 3 months of free support after launch.\\n"
+                    "To start a project, email support@techcorp.com or call +1 (555) 123-4567."
+                )
             },
             faqs=[
                 {"question": "What are your business hours?", "answer": "We are open Monday to Friday, 9 AM to 6 PM EST."},
@@ -928,6 +943,9 @@ BUSINESS INFORMATION:
 
 FAQs:
 {chr(10).join([f"- Q: {faq['question']} A: {faq['answer']}" for faq in config.faqs])}
+
+COMPANY KNOWLEDGE (the main source for questions about the company — its history, policies, prices, delivery, warranty and anything else written here):
+{kb.get('company_info', '') or 'N/A'}
 
 RULES:
 1. Always greet the caller warmly
@@ -1053,10 +1071,70 @@ AVAILABLE INTENTS:
     
     @staticmethod
     def _significant_words(text: str) -> set:
-        return {
-            w for w in re.findall(r"[a-z0-9]+", text.lower())
-            if len(w) > 3 and w not in _STOPWORDS
-        }
+        words = set()
+        for w in re.findall(r"[a-z0-9]+", text.lower()):
+            if len(w) <= 3 or w in _STOPWORDS:
+                continue
+            # Light stemming so "deliver" matches "delivery"-style plurals
+            # and simple plural forms ("charges" -> "charge").
+            if len(w) > 4 and w.endswith("s"):
+                w = w[:-1]
+            words.add(w)
+        return words
+
+    @staticmethod
+    def _kb_passages(text: str) -> list:
+        """Split free-form company knowledge into searchable passages.
+
+        Structure the agent reads: one fact per line; a long line is
+        split into its sentences; blank lines separate topics.
+        """
+        passages = []
+        for line in (text or "").splitlines():
+            line = line.strip(" \\t-•*")
+            if not line:
+                continue
+            if len(line) > 220:
+                parts = re.split(r"(?<=[.!?])\\s+", line)
+                passages.extend(p.strip() for p in parts if len(p.strip()) > 15)
+            else:
+                passages.append(line)
+        return passages
+
+    def _company_info_lookup(self, message: str, msg_words: set) -> Optional[tuple]:
+        """Answer from the free-form company knowledge text, if it matches."""
+        kb = self.config.knowledge_base or {}
+        info = (kb.get("company_info") or "").strip()
+        if not info:
+            return None
+        passages = self._kb_passages(info)
+        if not passages:
+            return None
+
+        lower = message.lower()
+        # "Tell me about your company" style questions get the overview:
+        # the first passage(s) of the knowledge text.
+        if ("about" in lower and ("company" in lower or "business" in lower)) or \\
+           "who are you" in lower or "your company" in lower or "your business" in lower:
+            overview = passages[0]
+            if len(passages) > 1 and len(overview) < 160:
+                overview = overview + " " + passages[1]
+            return overview, "general_inquiry"
+
+        if not msg_words:
+            return None
+        best, best_shared = None, 0
+        for passage in passages:
+            shared = len(self._significant_words(passage) & msg_words)
+            if shared > best_shared:
+                best, best_shared = passage, shared
+        # Accept a passage when at least two of the caller's key words
+        # appear in it and they cover at least half of those key words
+        # (a single key word must match exactly).
+        needed = 1 if len(msg_words) == 1 else 2
+        if best is not None and best_shared >= needed and best_shared * 2 >= len(msg_words):
+            return best, "general_inquiry"
+        return None
 
     def _kb_lookup(self, message: str) -> Optional[tuple]:
         """
@@ -1099,7 +1177,9 @@ AVAILABLE INTENTS:
             return f"Our email address is {fact('email')}.", "general_inquiry"
         if any(w in lower for w in ("service", "offer", "provide")) and fact("services"):
             return f"We offer {fact('services')}.", "general_inquiry"
-        return None
+        # 3) Free-form company knowledge written in Agent Setup: any
+        # other company question is answered from that text.
+        return self._company_info_lookup(message, msg_words)
 
     async def _detect_intent(self, call_id: str, message: str) -> str:
         """Detect the caller's intent from their message"""
@@ -1201,8 +1281,7 @@ Return only the category name, nothing else."""
     
     def get_config(self) -> AgentConfig:
         """Get current agent configuration"""
-        return self.config
-`,
+        return self.config`,
 
   'app/services/call_manager.py': `"""
 Call Manager Service - Handles call lifecycle

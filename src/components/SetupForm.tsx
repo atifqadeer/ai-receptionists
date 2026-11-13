@@ -33,6 +33,7 @@ export default function SetupForm() {
     phone: '+1 (555) 123-4567',
     email: 'support@techcorp.com',
     services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
+    companyInfo: 'TechCorp Solutions is a software company based in San Francisco, California.\nWe build web applications, mobile apps, cloud solutions and AI integrations for startups and enterprises.\nOur team has more than 40 engineers, designers and project managers.\nWe offer a free 30-minute consultation for every new project.\nA basic business website starts at $2,500; full project pricing depends on the scope.\nEvery project includes 3 months of free support after launch.\nTo start a project, email support@techcorp.com or call +1 (555) 123-4567.',
     faqs: [
       { q: 'What are your business hours?', a: 'We are open Monday to Friday, 9 AM to 6 PM EST.' },
       { q: 'How do I book an appointment?', a: 'I can help you book an appointment right now. What date and time works best for you?' },
@@ -359,6 +360,30 @@ export default function SetupForm() {
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none resize-none"
               />
             </div>
+          </div>
+
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+              <i className="fa-solid fa-book-open text-violet-400"></i>
+              Company Knowledge
+            </h3>
+            <p className="text-sm text-gray-400 leading-relaxed">
+              Write everything the agent should know about your company here — about the business,
+              products, prices, delivery, warranty, policies, anything a caller might ask. The agent
+              reads this text and answers questions from it. <span className="text-gray-300">How to structure it:</span> one
+              fact per line, or a short paragraph per topic with a blank line between topics.
+            </p>
+            <textarea
+              value={knowledge.companyInfo ?? ''}
+              onChange={(e) => setKnowledge({ ...knowledge, companyInfo: e.target.value })}
+              rows={12}
+              placeholder={'Example:\nABC Store is a sanitary shop in Shahdara, Lahore.\nWe sell taps, sinks and showers from Faisal, Master and Steelline.\nWe offer free home delivery within Lahore on orders over Rs 5,000.\nAll taps carry a 5-year replacement warranty.\nReturns are accepted within 14 days with the original receipt.'}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none resize-y leading-relaxed"
+            />
+            <p className="text-xs text-gray-500 flex items-center gap-1.5">
+              <i className="fa-solid fa-circle-info"></i>
+              Keep each fact on its own line — the agent finds the line that matches the caller's question and answers with it word for word. Remember to press Save Configuration below.
+            </p>
           </div>
 
           <div className="bg-gray-900 rounded-xl border border-gray-800 p-6">

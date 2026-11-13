@@ -41,6 +41,7 @@ export default function CallSimulator() {
     email: 'support@techcorp.com',
     address: '',
     services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
+    companyInfo: '',
     faqs: [] as Array<{ q: string; a: string }>,
   });
 
@@ -121,7 +122,27 @@ export default function CallSimulator() {
   // the FAQs at all, so anything outside six keyword buckets fell back
   // to a generic non-answer.
   const significantWords = (t: string) =>
-    t.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 3 && !KB_STOPWORDS.has(w));
+    t.toLowerCase().split(/[^a-z0-9]+/)
+      .filter(w => w.length > 3 && !KB_STOPWORDS.has(w))
+      // Light stemming: simple plurals match their singular form.
+      .map(w => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
+
+  // The free-form Company Knowledge text from Agent Setup, split into
+  // the passages the agent searches: one fact per line; a long line is
+  // split into sentences.
+  const kbPassages = (info: string): string[] => {
+    const out: string[] = [];
+    for (const raw of (info || '').split('\n')) {
+      const line = raw.replace(/^[\s\-•*]+/, '').trim();
+      if (!line) continue;
+      if (line.length > 220) {
+        line.split(/(?<=[.!?])\s+/).forEach(p => { if (p.trim().length > 15) out.push(p.trim()); });
+      } else {
+        out.push(line);
+      }
+    }
+    return out;
+  };
 
   const findKbAnswer = (text: string): { text: string; intent: string } | null => {
     const lower = text.toLowerCase();
@@ -146,6 +167,27 @@ export default function CallSimulator() {
     }
     if (lower.includes('email') && knowledge.email) {
       return { text: `Our email address is ${knowledge.email}.`, intent: 'General Inquiry' };
+    }
+    // Free-form Company Knowledge from Agent Setup: any other company
+    // question is answered from that text, passage by passage.
+    const passages = kbPassages(knowledge.companyInfo ?? '');
+    if (passages.length > 0) {
+      if ((lower.includes('about') && (lower.includes('company') || lower.includes('business')))
+        || lower.includes('who are you') || lower.includes('your company') || lower.includes('your business')) {
+        let overview = passages[0];
+        if (passages.length > 1 && overview.length < 160) overview += ' ' + passages[1];
+        return { text: overview, intent: 'General Inquiry' };
+      }
+      let best: string | null = null;
+      let bestShared = 0;
+      for (const p of passages) {
+        const shared = significantWords(p).filter(w => msgWords.has(w)).length;
+        if (shared > bestShared) { best = p; bestShared = shared; }
+      }
+      const needed = msgWords.size === 1 ? 1 : 2;
+      if (best && bestShared >= needed && bestShared * 2 >= msgWords.size) {
+        return { text: best, intent: 'General Inquiry' };
+      }
     }
     return null;
   };

@@ -63,6 +63,7 @@ export default function RealCallSimulator() {
     email: 'support@techcorp.com',
     address: '',
     services: 'Web Development, Mobile Apps, Cloud Solutions',
+    companyInfo: '',
     faqs: [] as Array<{ q: string; a: string }>,
   });
 
@@ -154,6 +155,45 @@ export default function RealCallSimulator() {
     return 'General Inquiry';
   }, [knowledge.faqs]);
 
+  // Free-form Company Knowledge from Agent Setup: the agent answers
+  // company questions from that text, passage by passage (one fact per
+  // line; long lines split into sentences).
+  const findCompanyInfoAnswer = (text: string): string | null => {
+    const stop = new Set(['what', 'when', 'where', 'which', 'your', 'yours', 'about', 'there', 'their', 'this', 'that', 'with', 'have', 'does', 'will', 'would', 'could', 'should', 'please', 'thanks', 'thank']);
+    const sig = (t: string) => t.toLowerCase().split(/[^a-z0-9]+/)
+      .filter(w => w.length > 3 && !stop.has(w))
+      .map(w => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
+    const passages: string[] = [];
+    for (const raw of (knowledge.companyInfo ?? '').split('\n')) {
+      const line = raw.replace(/^[\s\-•*]+/, '').trim();
+      if (!line) continue;
+      if (line.length > 220) {
+        line.split(/(?<=[.!?])\s+/).forEach(p => { if (p.trim().length > 15) passages.push(p.trim()); });
+      } else {
+        passages.push(line);
+      }
+    }
+    if (passages.length === 0) return null;
+    const lower = text.toLowerCase();
+    if ((lower.includes('about') && (lower.includes('company') || lower.includes('business')))
+      || lower.includes('who are you') || lower.includes('your company') || lower.includes('your business')) {
+      let overview = passages[0];
+      if (passages.length > 1 && overview.length < 160) overview += ' ' + passages[1];
+      return overview;
+    }
+    const msgWords = new Set(sig(text));
+    if (msgWords.size === 0) return null;
+    let best: string | null = null;
+    let bestShared = 0;
+    for (const p of passages) {
+      const shared = sig(p).filter(w => msgWords.has(w)).length;
+      if (shared > bestShared) { best = p; bestShared = shared; }
+    }
+    const needed = msgWords.size === 1 ? 1 : 2;
+    if (best && bestShared >= needed && bestShared * 2 >= msgWords.size) return best;
+    return null;
+  };
+
   // Generate response
   const generateResponse = useCallback((text: string, intent: string): string => {
     if (intent.startsWith('FAQ:')) {
@@ -161,7 +201,10 @@ export default function RealCallSimulator() {
       const faq = knowledge.faqs?.find(f => f.q === question);
       if (faq) return faq.a;
     }
-    
+
+    const companyAnswer = findCompanyInfoAnswer(text);
+    if (companyAnswer) return companyAnswer;
+
     const responses: Record<string, string[]> = {
       'Appointment Booking': [
         `I'd be happy to help you book an appointment! We're available ${knowledge.businessHours}. What date and time works best for you?`,
