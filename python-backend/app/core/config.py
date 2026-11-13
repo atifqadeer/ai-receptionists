@@ -4,7 +4,7 @@ Core Configuration - Loads environment variables and settings
 
 import os
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
 # Load .env file
@@ -22,8 +22,9 @@ class Settings(BaseSettings):
     APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
     APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "dev-secret-key-change-in-production")
     
-    # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_receptionist.db")
+    # Database (must be the async aiosqlite form — the old sync default
+    # made create_async_engine raise on startup when no .env was present)
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/ai_receptionist.db")
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -52,9 +53,11 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # extra="ignore": the shipped .env.example carries keys for optional
+    # integrations (SENDGRID_*, SLACK_*, GOOGLE_CALENDAR_*). With the old
+    # inner-Config setup those undeclared keys crashed startup with
+    # "Extra inputs are not permitted".
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
 
 settings = Settings()

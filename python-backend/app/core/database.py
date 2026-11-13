@@ -23,6 +23,15 @@ class Base(DeclarativeBase):
 
 async def init_db():
     """Initialize database tables"""
+    # A sqlite file URL like sqlite+aiosqlite:///./data/x.db fails to
+    # open if the parent folder does not exist yet — create it.
+    url = settings.DATABASE_URL
+    if url.startswith("sqlite") and ":///" in url:
+        from pathlib import Path
+        db_path = Path(url.split(":///", 1)[1])
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

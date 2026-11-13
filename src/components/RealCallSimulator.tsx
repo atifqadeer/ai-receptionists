@@ -61,6 +61,7 @@ export default function RealCallSimulator() {
     businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
     phone: '+1 (555) 123-4567',
     email: 'support@techcorp.com',
+    address: '',
     services: 'Web Development, Mobile Apps, Cloud Solutions',
     faqs: [] as Array<{ q: string; a: string }>,
   });
@@ -190,7 +191,9 @@ export default function RealCallSimulator() {
         `Our pricing varies based on your needs. We offer ${knowledge.services}. Want me to connect you with sales?`,
       ],
       'Location': [
-        `For our exact address, please contact us at ${knowledge.phone} or ${knowledge.email}.`,
+        knowledge.address
+          ? `We're located at ${knowledge.address}. Is there anything else I can help you with?`
+          : `For our exact address, please contact us at ${knowledge.phone} or ${knowledge.email}.`,
       ],
       'Contact Info': [
         `You can reach us at ${knowledge.phone} or ${knowledge.email}. We're available ${knowledge.businessHours}.`,

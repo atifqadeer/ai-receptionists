@@ -119,49 +119,127 @@ pytest==7.4.4
 pytest-asyncio==0.23.3
 `,
 
-  '.env.example': `# AI Receptionist - Environment Configuration
-APP_NAME=AI Receptionist Hub
+  '.env.example': `# ============================================
+# AI Receptionist - Environment Configuration
+# ============================================
+# 
+# 📋 HOW TO USE THIS FILE:
+# 1. Copy this file: cp .env.example .env
+# 2. Edit .env with your actual API keys
+# 3. Choose DEVELOPMENT or PRODUCTION section below
+#
+# 🔑 API KEYS GUIDE:
+# - Development keys = For testing (cheap/free)
+# - Production keys = For live use (real charges)
+# - See API_KEYS_GUIDE.md for full details
+#
+# ============================================
+
+
+# ============================================
+# 🧪 DEVELOPMENT CONFIGURATION
+# ============================================
+# Use this section for local testing & development
+# Cost: ~$5-10/month (very affordable)
+
 APP_ENV=development
 APP_DEBUG=true
 APP_HOST=0.0.0.0
 APP_PORT=8000
-APP_SECRET_KEY=your-super-secret-key-change-this
+APP_SECRET_KEY=dev-secret-key-change-in-production
 
-DATABASE_URL=sqlite:///./ai_receptionist.db
-REDIS_URL=redis://localhost:6379/0
+# Database (SQLite - simple for dev)
+DATABASE_URL=sqlite+aiosqlite:///./data/ai_receptionist.db
 
+# OpenAI (REQUIRED - use cheaper GPT-3.5 for dev)
+# Get key: https://platform.openai.com/api-keys
 OPENAI_API_KEY=sk-your-openai-api-key-here
-OPENAI_MODEL=gpt-4-turbo-preview
+OPENAI_MODEL=gpt-3.5-turbo
 OPENAI_TEMPERATURE=0.7
 OPENAI_MAX_TOKENS=500
 
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-ANTHROPIC_MODEL=claude-3-opus-20240229
-
-ELEVENLABS_API_KEY=your-elevenlabs-api-key
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
-ELEVENLABS_MODEL_ID=eleven_multilingual_v2
-
-DEEPGRAM_API_KEY=your-deepgram-api-key
-DEEPGRAM_MODEL=nova-2
-
-TWILIO_ACCOUNT_SID=ACyour-account-sid
-TWILIO_AUTH_TOKEN=your-auth-token
-TWILIO_PHONE_NUMBER=+1234567890
+# Twilio (OPTIONAL - use TEST credentials, no real calls)
+# Get test keys: https://console.twilio.com → Test Credentials
+TWILIO_ACCOUNT_SID=ACyour_test_account_sid
+TWILIO_AUTH_TOKEN=your_test_auth_token
+TWILIO_PHONE_NUMBER=+15005550006
 TWILIO_WEBHOOK_URL=http://localhost:8000/webhooks/twilio
 
+# ElevenLabs (OPTIONAL - free tier: 10k chars/month)
+# Get key: https://elevenlabs.io/ (free signup)
+ELEVENLABS_API_KEY=your_free_tier_key
+ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+
+# Deepgram (OPTIONAL - free $200 credit)
+# Get key: https://console.deepgram.com/ (free signup)
+DEEPGRAM_API_KEY=your_free_credit_key
+
+
+# ============================================
+# 🚀 PRODUCTION CONFIGURATION
+# ============================================
+# Uncomment this section and comment out the dev section above
+# when deploying to production with real customers
+# Cost: ~$60-200/month (depends on usage)
+
+# APP_ENV=production
+# APP_DEBUG=false
+# APP_HOST=0.0.0.0
+# APP_PORT=8000
+# APP_SECRET_KEY=CHANGE-THIS-TO-A-STRONG-RANDOM-KEY
+# 
+# # Database (PostgreSQL - robust for production)
+# DATABASE_URL=postgresql://user:password@localhost:5432/ai_receptionist
+# 
+# # OpenAI (REQUIRED - use GPT-4 for best quality)
+# # Get key: https://platform.openai.com/api-keys
+# # IMPORTANT: Set spending limits!
+# OPENAI_API_KEY=sk-your-live-api-key
+# OPENAI_MODEL=gpt-4-turbo
+# OPENAI_TEMPERATURE=0.7
+# OPENAI_MAX_TOKENS=500
+# 
+# # Twilio (LIVE credentials - real phone calls)
+# # Get keys: https://console.twilio.com → Live Credentials
+# # IMPORTANT: Real charges apply!
+# TWILIO_ACCOUNT_SID=ACyour_live_account_sid
+# TWILIO_AUTH_TOKEN=your_live_auth_token
+# TWILIO_PHONE_NUMBER=+1234567890
+# TWILIO_WEBHOOK_URL=https://yourdomain.com/webhooks/twilio
+# 
+# # ElevenLabs (PAID plan - commercial use)
+# # Get key: https://elevenlabs.io/app/subscription
+# ELEVENLABS_API_KEY=your_paid_plan_key
+# ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+# 
+# # Deepgram (PAID plan - production use)
+# # Get key: https://console.deepgram.com/
+# DEEPGRAM_API_KEY=your_paid_plan_key
+
+
+# ============================================
+# 🔐 SECURITY SETTINGS (Both Environments)
+# ============================================
+
+# JWT Authentication
+JWT_SECRET_KEY=your-jwt-secret-key-make-this-random
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+# Redis (Optional - for caching & queues)
+REDIS_URL=redis://localhost:6379/0
+
+# Google Calendar (Optional)
 GOOGLE_CALENDAR_CREDENTIALS_PATH=./credentials/google-calendar.json
 GOOGLE_CALENDAR_ID=primary
 
+# Slack Notifications (Optional)
 SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
 SLACK_CHANNEL_ID=C0123456789
 
+# SendGrid Email (Optional)
 SENDGRID_API_KEY=SG.your-sendgrid-api-key
 SENDGRID_FROM_EMAIL=receptionist@yourcompany.com
-
-JWT_SECRET_KEY=your-jwt-secret-key
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
 `,
 
   '.gitignore': `# Python
@@ -528,76 +606,110 @@ python main.py
 `,
 
   'app/core/config.py': `"""
-Core Configuration - Loads environment variables
+Core Configuration - Loads environment variables and settings
 """
 
 import os
-from pydantic_settings import BaseSettings
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
+# Load .env file
 load_dotenv()
 
 
 class Settings(BaseSettings):
+    """Application settings loaded from environment variables"""
+    
+    # App Settings
     APP_NAME: str = os.getenv("APP_NAME", "AI Receptionist Hub")
     APP_ENV: str = os.getenv("APP_ENV", "development")
     APP_DEBUG: bool = os.getenv("APP_DEBUG", "true").lower() == "true"
     APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
     APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
-    APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "dev-secret-key")
+    APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "dev-secret-key-change-in-production")
     
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_receptionist.db")
+    # Database (must be the async aiosqlite form — the old sync default
+    # made create_async_engine raise on startup when no .env was present)
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/ai_receptionist.db")
+    
+    # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     
+    # OpenAI
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
     OPENAI_TEMPERATURE: float = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
     OPENAI_MAX_TOKENS: int = int(os.getenv("OPENAI_MAX_TOKENS", "500"))
     
+    # ElevenLabs TTS
     ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
     ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
     
+    # Deepgram STT
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
     
+    # Twilio
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
     TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
     TWILIO_PHONE_NUMBER: str = os.getenv("TWILIO_PHONE_NUMBER", "")
     TWILIO_WEBHOOK_URL: str = os.getenv("TWILIO_WEBHOOK_URL", "http://localhost:8000/webhooks/twilio")
     
+    # JWT
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "jwt-secret-key")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # extra="ignore": the shipped .env.example carries keys for optional
+    # integrations (SENDGRID_*, SLACK_*, GOOGLE_CALENDAR_*). With the old
+    # inner-Config setup those undeclared keys crashed startup with
+    # "Extra inputs are not permitted".
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
 
 settings = Settings()
 `,
 
   'app/core/database.py': `"""
-Database Setup - SQLAlchemy async models
+Database Setup - SQLAlchemy async models and initialization
 """
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
-engine = create_async_engine(settings.DATABASE_URL, echo=settings.APP_DEBUG)
+# Create async engine
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=settings.APP_DEBUG,
+)
+
+# Create session factory
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 class Base(DeclarativeBase):
+    """Base class for all database models"""
     pass
 
 
 async def init_db():
+    """Initialize database tables"""
+    # A sqlite file URL like sqlite+aiosqlite:///./data/x.db fails to
+    # open if the parent folder does not exist yet — create it.
+    url = settings.DATABASE_URL
+    if url.startswith("sqlite") and ":///" in url:
+        from pathlib import Path
+        db_path = Path(url.split(":///", 1)[1])
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
 async def get_db():
+    """Dependency to get database session"""
     async with async_session() as session:
         yield session
 `,
@@ -704,33 +816,82 @@ class CallLog(BaseModel):
 `,
 
   'app/services/ai_agent.py': `"""
-AI Agent Service - Core AI receptionist logic
+AI Agent Service - Core AI receptionist logic using OpenAI/Anthropic
 """
 
-from typing import AsyncGenerator, Optional, Dict
+import json
+import re
+from pathlib import Path
+from typing import AsyncGenerator, Optional
 from datetime import datetime
 from loguru import logger
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.models.schemas import AgentConfig, CallContext, AgentResponse
+from app.models.schemas import (
+    AgentConfig, CallContext, Message, AgentResponse
+)
+
+# The agent's configuration (identity + knowledge base + FAQs) is the
+# single source the agent answers from. It is persisted to disk so the
+# knowledge base set in the dashboard survives restarts — previously it
+# lived only in memory and reset to the hardcoded defaults on restart.
+_CONFIG_FILE = Path(__file__).resolve().parents[2] / "data" / "agent_config.json"
+
+_STOPWORDS = {
+    "what", "when", "where", "which", "your", "yours", "about", "there",
+    "their", "this", "that", "with", "have", "does", "did", "will",
+    "would", "could", "should", "please", "thanks", "thank",
+}
 
 
 class AIAgent:
+    """
+    AI Receptionist Agent
+    Handles conversation logic, intent detection, and response generation
+    """
+    
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.config = self._load_default_config()
-        self.conversation_history: Dict[str, list] = {}
-        
+        self.config = self._load_config()
+        self.conversation_history: dict[str, list[dict]] = {}
+
+    def _load_config(self) -> AgentConfig:
+        """Load the persisted config if present, else the defaults."""
+        try:
+            if _CONFIG_FILE.exists():
+                data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+                logger.info(f"Agent config loaded from {_CONFIG_FILE}")
+                return AgentConfig.model_validate(data)
+        except Exception as e:
+            logger.warning(f"Could not load saved agent config ({e}); using defaults")
+        return self._load_default_config()
+
+    def _save_config(self) -> None:
+        """Persist the current config (knowledge base included)."""
+        try:
+            _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _CONFIG_FILE.write_text(
+                json.dumps(self.config.model_dump(), indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Could not save agent config: {e}")
+
     def _load_default_config(self) -> AgentConfig:
+        """Load default agent configuration"""
         return AgentConfig(
             agent_name="Aria",
             company_name="TechCorp Solutions",
             language="English",
             voice="skylar",
+            speaking_rate=1.0,
+            pitch=1.0,
             greeting="Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?",
             farewell="Thank you for calling! Have a wonderful day.",
             personality="professional",
+            max_call_duration=15,
+            silence_timeout=8,
+            allow_interrupts=True,
             knowledge_base={
                 "business_hours": "Monday to Friday, 9:00 AM to 6:00 PM EST",
                 "address": "123 Innovation Drive, Suite 400, San Francisco, CA 94102",
@@ -740,43 +901,114 @@ class AIAgent:
             },
             faqs=[
                 {"question": "What are your business hours?", "answer": "We are open Monday to Friday, 9 AM to 6 PM EST."},
-                {"question": "How do I book an appointment?", "answer": "I can help you book an appointment right now."},
+                {"question": "How do I book an appointment?", "answer": "I can help you book an appointment right now. What date and time works best for you?"},
+                {"question": "What services do you offer?", "answer": "We offer web development, mobile apps, cloud solutions, and AI integration services."},
             ]
         )
     
     def _build_system_prompt(self) -> str:
+        """Build the system prompt for the AI agent"""
         config = self.config
         kb = config.knowledge_base
-        return f"""You are {config.agent_name}, a professional AI receptionist for {config.company_name}.
+        
+        return f"""You are {config.agent_name}, a professional and friendly AI receptionist for {config.company_name}.
+
+YOUR ROLE:
+- Answer incoming calls professionally
+- Help callers with appointments, inquiries, and general information
+- Route complex issues to human agents when needed
+- Maintain a {config.personality} tone throughout the conversation
 
 BUSINESS INFORMATION:
-- Hours: {kb.get('business_hours', 'N/A')}
+- Business Hours: {kb.get('business_hours', 'N/A')}
 - Address: {kb.get('address', 'N/A')}
 - Phone: {kb.get('phone', 'N/A')}
 - Email: {kb.get('email', 'N/A')}
 - Services: {kb.get('services', 'N/A')}
 
+FAQs:
+{chr(10).join([f"- Q: {faq['question']} A: {faq['answer']}" for faq in config.faqs])}
+
 RULES:
-1. Greet callers warmly
-2. Identify caller's intent
-3. Provide accurate information
-4. Offer transfer to human if needed
-5. Keep responses concise (voice-friendly)
-6. Never make up information
-7. Confirm important details
+1. Always greet the caller warmly
+2. Listen carefully and identify the caller's intent
+3. KNOWLEDGE BASE ONLY: answer questions using ONLY the BUSINESS INFORMATION and FAQs above. If the answer is not in that data, say you don't have that information and offer to connect the caller with the team — never invent hours, prices, addresses, policies or services.
+4. If you can't help, offer to transfer to a human agent
+5. Keep responses concise and conversational (suitable for voice)
+6. Never make up information you don't have
+7. Always confirm important details (appointments, contact info)
 8. End calls politely
+
+RESPONSE FORMAT:
+Respond in a natural, conversational way. Keep responses under 3 sentences when possible.
+When you detect an intent, include it in your response.
+
+AVAILABLE INTENTS:
+- appointment_booking: Caller wants to schedule an appointment
+- business_hours: Caller asking about operating hours
+- general_inquiry: General questions about the company
+- technical_support: Caller needs technical help
+- complaint: Caller has a complaint
+- transfer_request: Caller wants to speak to a human
+- pricing: Caller asking about prices/services
+- other: Anything else
 """
 
-    async def process_message(self, call_id: str, user_message: str, context: Optional[CallContext] = None) -> AgentResponse:
+    async def process_message(
+        self,
+        call_id: str,
+        user_message: str,
+        context: Optional[CallContext] = None
+    ) -> AgentResponse:
+        """
+        Process a caller's message and generate a response
+        
+        Args:
+            call_id: Unique call identifier
+            user_message: The caller's message (transcribed from speech)
+            context: Additional call context
+            
+        Returns:
+            AgentResponse with the agent's reply and detected intent
+        """
+        # Initialize conversation history for new calls
         if call_id not in self.conversation_history:
             self.conversation_history[call_id] = [
                 {"role": "system", "content": self._build_system_prompt()}
             ]
-            logger.info(f"New call: {call_id}")
+            logger.info(f"New call started: {call_id}")
         
-        self.conversation_history[call_id].append({"role": "user", "content": user_message})
-        
+        # Add user message to history
+        self.conversation_history[call_id].append({
+            "role": "user",
+            "content": user_message
+        })
+
+        # Knowledge base first: if the caller's question matches a
+        # configured FAQ or asks for a stored business fact, answer
+        # verbatim from the knowledge base. Chat and phone calls both
+        # come through here, so both speak from the same data — and
+        # these answers work even when the AI provider is unavailable.
+        kb_hit = self._kb_lookup(user_message)
+        if kb_hit is not None:
+            answer, intent = kb_hit
+            self.conversation_history[call_id].append({
+                "role": "assistant",
+                "content": answer
+            })
+            logger.info(f"Call {call_id} - answered from knowledge base (intent: {intent})")
+            return AgentResponse(
+                message=answer,
+                intent=intent,
+                confidence=1.0,
+                call_id=call_id,
+                timestamp=datetime.utcnow().isoformat(),
+                requires_action=self._check_requires_action(intent),
+                action_data=self._get_action_data(intent, user_message)
+            )
+
         try:
+            # Call OpenAI API
             response = await self.client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=self.conversation_history[call_id],
@@ -785,9 +1017,17 @@ RULES:
             )
             
             agent_message = response.choices[0].message.content
-            self.conversation_history[call_id].append({"role": "assistant", "content": agent_message})
             
+            # Add agent response to history
+            self.conversation_history[call_id].append({
+                "role": "assistant",
+                "content": agent_message
+            })
+            
+            # Detect intent from the conversation
             intent = await self._detect_intent(call_id, user_message)
+            
+            logger.info(f"Call {call_id} - Intent: {intent} | Response: {agent_message[:50]}...")
             
             return AgentResponse(
                 message=agent_message,
@@ -795,14 +1035,14 @@ RULES:
                 confidence=0.95,
                 call_id=call_id,
                 timestamp=datetime.utcnow().isoformat(),
-                requires_action=intent in ["appointment_booking", "transfer_request", "complaint"],
-                action_data={"action": "collect_details" if intent == "appointment_booking" else "none"}
+                requires_action=self._check_requires_action(intent),
+                action_data=self._get_action_data(intent, user_message)
             )
             
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error processing message for call {call_id}: {e}")
             return AgentResponse(
-                message="I'm sorry, I'm having trouble right now. Let me connect you with someone.",
+                message="I'm sorry, I'm having trouble processing your request right now. Let me connect you with someone who can help.",
                 intent="error",
                 confidence=0.0,
                 call_id=call_id,
@@ -811,11 +1051,65 @@ RULES:
                 action_data={"action": "transfer_to_human"}
             )
     
+    @staticmethod
+    def _significant_words(text: str) -> set:
+        return {
+            w for w in re.findall(r"[a-z0-9]+", text.lower())
+            if len(w) > 3 and w not in _STOPWORDS
+        }
+
+    def _kb_lookup(self, message: str) -> Optional[tuple]:
+        """
+        Match the caller's message against the knowledge base.
+
+        Returns (answer, intent) when an FAQ matches or the message asks
+        for a stored business fact (hours, address, phone, email,
+        services); otherwise None so the AI model handles it — grounded
+        by the same knowledge base in its system prompt.
+        """
+        lower = message.lower()
+        msg_words = self._significant_words(message)
+
+        # 1) FAQs: match on the FAQ question's significant words.
+        for faq in self.config.faqs or []:
+            question = (faq.get("question") or "").strip()
+            answer = (faq.get("answer") or "").strip()
+            if not question or not answer:
+                continue
+            q_words = self._significant_words(question)
+            if not q_words:
+                continue
+            shared = len(q_words & msg_words)
+            if shared >= min(2, len(q_words)):
+                return answer, "general_inquiry"
+
+        # 2) Stored business facts.
+        kb = self.config.knowledge_base or {}
+
+        def fact(key: str) -> str:
+            return (kb.get(key) or "").strip()
+
+        if any(w in lower for w in ("hour", "open", "close", "timing")) and fact("business_hours"):
+            return f"Our business hours are {fact('business_hours')}.", "business_hours"
+        if any(w in lower for w in ("where", "address", "location", "located", "direction")) and fact("address"):
+            return f"We are located at {fact('address')}.", "general_inquiry"
+        if any(w in lower for w in ("phone", "number", "contact")) and fact("phone"):
+            return f"You can reach us at {fact('phone')}.", "general_inquiry"
+        if "email" in lower and fact("email"):
+            return f"Our email address is {fact('email')}.", "general_inquiry"
+        if any(w in lower for w in ("service", "offer", "provide")) and fact("services"):
+            return f"We offer {fact('services')}.", "general_inquiry"
+        return None
+
     async def _detect_intent(self, call_id: str, message: str) -> str:
-        intent_prompt = f"""Analyze this message and return ONLY the intent category.
+        """Detect the caller's intent from their message"""
+        intent_prompt = f"""Analyze this caller message and return ONLY the intent category.
+        
 Message: "{message}"
+
 Categories: appointment_booking, business_hours, general_inquiry, technical_support, complaint, transfer_request, pricing, other
-Return only the category name."""
+
+Return only the category name, nothing else."""
 
         try:
             response = await self.client.chat.completions.create(
@@ -825,22 +1119,88 @@ Return only the category name."""
                 max_tokens=20
             )
             intent = response.choices[0].message.content.strip().lower()
-            valid = ["appointment_booking", "business_hours", "general_inquiry", "technical_support", "complaint", "transfer_request", "pricing", "other"]
-            return intent if intent in valid else "other"
-        except:
+            valid_intents = [
+                "appointment_booking", "business_hours", "general_inquiry",
+                "technical_support", "complaint", "transfer_request", "pricing", "other"
+            ]
+            return intent if intent in valid_intents else "other"
+        except Exception:
             return "other"
     
+    def _check_requires_action(self, intent: str) -> bool:
+        """Check if the detected intent requires an automated action"""
+        action_intents = [
+            "appointment_booking", "transfer_request", "complaint"
+        ]
+        return intent in action_intents
+    
+    def _get_action_data(self, intent: str, message: str) -> dict:
+        """Get action data based on detected intent"""
+        actions = {
+            "appointment_booking": {"action": "collect_appointment_details"},
+            "transfer_request": {"action": "transfer_to_human"},
+            "complaint": {"action": "create_support_ticket"},
+        }
+        return actions.get(intent, {"action": "none"})
+    
+    async def stream_response(
+        self,
+        call_id: str,
+        user_message: str
+    ) -> AsyncGenerator[str, None]:
+        """Stream the agent's response token by token"""
+        if call_id not in self.conversation_history:
+            self.conversation_history[call_id] = [
+                {"role": "system", "content": self._build_system_prompt()}
+            ]
+        
+        self.conversation_history[call_id].append({
+            "role": "user",
+            "content": user_message
+        })
+        
+        stream = await self.client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=self.conversation_history[call_id],
+            temperature=settings.OPENAI_TEMPERATURE,
+            max_tokens=settings.OPENAI_MAX_TOKENS,
+            stream=True
+        )
+        
+        full_response = ""
+        async for chunk in stream:
+            if chunk.choices[0].delta.content:
+                token = chunk.choices[0].delta.content
+                full_response += token
+                yield token
+        
+        # Save complete response to history
+        self.conversation_history[call_id].append({
+            "role": "assistant",
+            "content": full_response
+        })
+    
     def end_call(self, call_id: str) -> dict:
+        """End a call and return summary"""
         history = self.conversation_history.pop(call_id, [])
-        return {"call_id": call_id, "messages_count": len(history), "ended_at": datetime.utcnow().isoformat()}
+        return {
+            "call_id": call_id,
+            "messages_count": len(history),
+            "ended_at": datetime.utcnow().isoformat(),
+            "summary": "Call ended successfully"
+        }
     
     def update_config(self, config_data: dict) -> AgentConfig:
+        """Update agent configuration and persist it to disk"""
         for key, value in config_data.items():
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
+        self._save_config()
+        logger.info("Agent configuration updated and saved")
         return self.config
     
     def get_config(self) -> AgentConfig:
+        """Get current agent configuration"""
         return self.config
 `,
 

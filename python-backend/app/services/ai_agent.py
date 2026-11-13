@@ -3,6 +3,8 @@ AI Agent Service - Core AI receptionist logic using OpenAI/Anthropic
 """
 
 import json
+import re
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 from datetime import datetime
 from loguru import logger
@@ -10,8 +12,20 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.models.schemas import (
-    AgentConfig, CallContext, Message, Intent, AgentResponse
+    AgentConfig, CallContext, Message, AgentResponse
 )
+
+# The agent's configuration (identity + knowledge base + FAQs) is the
+# single source the agent answers from. It is persisted to disk so the
+# knowledge base set in the dashboard survives restarts — previously it
+# lived only in memory and reset to the hardcoded defaults on restart.
+_CONFIG_FILE = Path(__file__).resolve().parents[2] / "data" / "agent_config.json"
+
+_STOPWORDS = {
+    "what", "when", "where", "which", "your", "yours", "about", "there",
+    "their", "this", "that", "with", "have", "does", "did", "will",
+    "would", "could", "should", "please", "thanks", "thank",
+}
 
 
 class AIAgent:
@@ -22,9 +36,30 @@ class AIAgent:
     
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.config = self._load_default_config()
+        self.config = self._load_config()
         self.conversation_history: dict[str, list[dict]] = {}
-        
+
+    def _load_config(self) -> AgentConfig:
+        """Load the persisted config if present, else the defaults."""
+        try:
+            if _CONFIG_FILE.exists():
+                data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+                logger.info(f"Agent config loaded from {_CONFIG_FILE}")
+                return AgentConfig.model_validate(data)
+        except Exception as e:
+            logger.warning(f"Could not load saved agent config ({e}); using defaults")
+        return self._load_default_config()
+
+    def _save_config(self) -> None:
+        """Persist the current config (knowledge base included)."""
+        try:
+            _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _CONFIG_FILE.write_text(
+                json.dumps(self.config.model_dump(), indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Could not save agent config: {e}")
+
     def _load_default_config(self) -> AgentConfig:
         """Load default agent configuration"""
         return AgentConfig(
@@ -80,7 +115,7 @@ FAQs:
 RULES:
 1. Always greet the caller warmly
 2. Listen carefully and identify the caller's intent
-3. Provide accurate information from the knowledge base
+3. KNOWLEDGE BASE ONLY: answer questions using ONLY the BUSINESS INFORMATION and FAQs above. If the answer is not in that data, say you don't have that information and offer to connect the caller with the team — never invent hours, prices, addresses, policies or services.
 4. If you can't help, offer to transfer to a human agent
 5. Keep responses concise and conversational (suitable for voice)
 6. Never make up information you don't have
@@ -131,7 +166,30 @@ AVAILABLE INTENTS:
             "role": "user",
             "content": user_message
         })
-        
+
+        # Knowledge base first: if the caller's question matches a
+        # configured FAQ or asks for a stored business fact, answer
+        # verbatim from the knowledge base. Chat and phone calls both
+        # come through here, so both speak from the same data — and
+        # these answers work even when the AI provider is unavailable.
+        kb_hit = self._kb_lookup(user_message)
+        if kb_hit is not None:
+            answer, intent = kb_hit
+            self.conversation_history[call_id].append({
+                "role": "assistant",
+                "content": answer
+            })
+            logger.info(f"Call {call_id} - answered from knowledge base (intent: {intent})")
+            return AgentResponse(
+                message=answer,
+                intent=intent,
+                confidence=1.0,
+                call_id=call_id,
+                timestamp=datetime.utcnow().isoformat(),
+                requires_action=self._check_requires_action(intent),
+                action_data=self._get_action_data(intent, user_message)
+            )
+
         try:
             # Call OpenAI API
             response = await self.client.chat.completions.create(
@@ -176,6 +234,56 @@ AVAILABLE INTENTS:
                 action_data={"action": "transfer_to_human"}
             )
     
+    @staticmethod
+    def _significant_words(text: str) -> set:
+        return {
+            w for w in re.findall(r"[a-z0-9]+", text.lower())
+            if len(w) > 3 and w not in _STOPWORDS
+        }
+
+    def _kb_lookup(self, message: str) -> Optional[tuple]:
+        """
+        Match the caller's message against the knowledge base.
+
+        Returns (answer, intent) when an FAQ matches or the message asks
+        for a stored business fact (hours, address, phone, email,
+        services); otherwise None so the AI model handles it — grounded
+        by the same knowledge base in its system prompt.
+        """
+        lower = message.lower()
+        msg_words = self._significant_words(message)
+
+        # 1) FAQs: match on the FAQ question's significant words.
+        for faq in self.config.faqs or []:
+            question = (faq.get("question") or "").strip()
+            answer = (faq.get("answer") or "").strip()
+            if not question or not answer:
+                continue
+            q_words = self._significant_words(question)
+            if not q_words:
+                continue
+            shared = len(q_words & msg_words)
+            if shared >= min(2, len(q_words)):
+                return answer, "general_inquiry"
+
+        # 2) Stored business facts.
+        kb = self.config.knowledge_base or {}
+
+        def fact(key: str) -> str:
+            return (kb.get(key) or "").strip()
+
+        if any(w in lower for w in ("hour", "open", "close", "timing")) and fact("business_hours"):
+            return f"Our business hours are {fact('business_hours')}.", "business_hours"
+        if any(w in lower for w in ("where", "address", "location", "located", "direction")) and fact("address"):
+            return f"We are located at {fact('address')}.", "general_inquiry"
+        if any(w in lower for w in ("phone", "number", "contact")) and fact("phone"):
+            return f"You can reach us at {fact('phone')}.", "general_inquiry"
+        if "email" in lower and fact("email"):
+            return f"Our email address is {fact('email')}.", "general_inquiry"
+        if any(w in lower for w in ("service", "offer", "provide")) and fact("services"):
+            return f"We offer {fact('services')}.", "general_inquiry"
+        return None
+
     async def _detect_intent(self, call_id: str, message: str) -> str:
         """Detect the caller's intent from their message"""
         intent_prompt = f"""Analyze this caller message and return ONLY the intent category.
@@ -266,11 +374,12 @@ Return only the category name, nothing else."""
         }
     
     def update_config(self, config_data: dict) -> AgentConfig:
-        """Update agent configuration"""
+        """Update agent configuration and persist it to disk"""
         for key, value in config_data.items():
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
-        logger.info("Agent configuration updated")
+        self._save_config()
+        logger.info("Agent configuration updated and saved")
         return self.config
     
     def get_config(self) -> AgentConfig:

@@ -9,6 +9,13 @@ interface Message {
   intent?: string;
 }
 
+// Words ignored when matching a caller question against FAQ questions.
+const KB_STOPWORDS = new Set([
+  'what', 'when', 'where', 'which', 'your', 'yours', 'about', 'there',
+  'their', 'this', 'that', 'with', 'have', 'does', 'will', 'would',
+  'could', 'should', 'please', 'thanks', 'thank',
+]);
+
 export default function CallSimulator() {
   // Load configurations from localStorage (shared with Agent Setup)
   const [identity] = useLocalStorage('agent-identity', {
@@ -32,7 +39,9 @@ export default function CallSimulator() {
     businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
     phone: '+1 (555) 123-4567',
     email: 'support@techcorp.com',
+    address: '',
     services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
+    faqs: [] as Array<{ q: string; a: string }>,
   });
 
   // Local state for editing greeting
@@ -107,7 +116,43 @@ export default function CallSimulator() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Knowledge base first: FAQs and stored business facts entered in
+  // Setup are the source of truth. Previously this chat never consulted
+  // the FAQs at all, so anything outside six keyword buckets fell back
+  // to a generic non-answer.
+  const significantWords = (t: string) =>
+    t.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 3 && !KB_STOPWORDS.has(w));
+
+  const findKbAnswer = (text: string): { text: string; intent: string } | null => {
+    const lower = text.toLowerCase();
+    const msgWords = new Set(significantWords(text));
+    for (const faq of knowledge.faqs ?? []) {
+      if (!faq.q?.trim() || !faq.a?.trim()) continue;
+      const qWords = significantWords(faq.q);
+      if (qWords.length === 0) continue;
+      const shared = qWords.filter(w => msgWords.has(w)).length;
+      if (shared >= Math.min(2, qWords.length)) {
+        return { text: faq.a, intent: 'FAQ' };
+      }
+    }
+    if (/(hour|open|close|timing)/.test(lower) && knowledge.businessHours) {
+      return { text: `Our business hours are ${knowledge.businessHours}. Is there anything else I can help you with?`, intent: 'Business Hours Inquiry' };
+    }
+    if (/(where|address|location|located|direction)/.test(lower) && knowledge.address) {
+      return { text: `We're located at ${knowledge.address}.`, intent: 'General Inquiry' };
+    }
+    if (/(phone|number|contact)/.test(lower) && knowledge.phone) {
+      return { text: `You can reach us at ${knowledge.phone}.`, intent: 'General Inquiry' };
+    }
+    if (lower.includes('email') && knowledge.email) {
+      return { text: `Our email address is ${knowledge.email}.`, intent: 'General Inquiry' };
+    }
+    return null;
+  };
+
   const getResponse = (text: string) => {
+    const kbAnswer = findKbAnswer(text);
+    if (kbAnswer) return kbAnswer;
     const lower = text.toLowerCase();
     if (lower.includes('appointment') || lower.includes('book') || lower.includes('schedule')) return agentResponses['appointment'];
     if (lower.includes('hours') || lower.includes('open') || lower.includes('time')) return agentResponses['hours'];
