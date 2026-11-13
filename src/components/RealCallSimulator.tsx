@@ -9,6 +9,11 @@ interface CallMessage {
   intent?: string;
 }
 
+// Normalize speech text for echo comparison: is the microphone just
+// hearing the agent's own voice coming out of the speakers?
+const normalizeSpeech = (t: string) =>
+  t.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
 const VOICE_PROFILES: Record<string, { rate: number; pitch: number; gender: 'male' | 'female' }> = {
   skylar: { rate: 1.0, pitch: 1.15, gender: 'female' },
   daniel: { rate: 0.95, pitch: 0.85, gender: 'male' },
@@ -43,6 +48,23 @@ export default function RealCallSimulator() {
   const isSpeakingRef = useRef(false);
   const callStatusRef = useRef<'idle' | 'dialing' | 'active' | 'ended'>('idle');
   const shouldListenRef = useRef(false);
+  const recognitionRunningRef = useRef(false);
+  const currentUtteranceRef = useRef('');
+  const utteranceSeqRef = useRef(0);
+  const allowInterruptsRef = useRef(true);
+
+  // Keep recognition running for the whole call. It is restarted from
+  // recognition.onend whenever the browser stops it (silence timeouts,
+  // transient errors), independent of whether the agent is speaking —
+  // the microphone must never depend on the speech lifecycle.
+  const ensureListening = () => {
+    const recognition = recognitionRef.current;
+    if (!recognition || recognitionRunningRef.current) return;
+    if (!shouldListenRef.current || callStatusRef.current !== 'active') return;
+    try {
+      recognition.start();
+    } catch (e) { /* already starting */ }
+  };
 
   const [identity] = useLocalStorage('agent-identity', {
     agentName: 'Aria',
@@ -55,6 +77,7 @@ export default function RealCallSimulator() {
   const [behavior] = useLocalStorage('agent-behavior', {
     greeting: 'Hello! Thank you for calling. I\'m your AI assistant. How can I help you today?',
     farewell: 'Thank you for calling! Have a wonderful day.',
+    allowInterrupts: true,
   });
 
   const [knowledge] = useLocalStorage('agent-knowledge', {
@@ -76,6 +99,10 @@ export default function RealCallSimulator() {
   useEffect(() => {
     callStatusRef.current = callStatus;
   }, [callStatus]);
+
+  useEffect(() => {
+    allowInterruptsRef.current = behavior.allowInterrupts !== false;
+  }, [behavior.allowInterrupts]);
 
   const speechRecognitionSupported = typeof window !== 'undefined' && 
     ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
@@ -349,53 +376,44 @@ export default function RealCallSimulator() {
       }
 
       window.speechSynthesis.cancel();
-      
+
       const utterance = new SpeechSynthesisUtterance(text);
       const voice = findBrowserVoice();
       if (voice) utterance.voice = voice;
-      
+
       const profile = VOICE_PROFILES[identity.voice] || VOICE_PROFILES.skylar;
       utterance.rate = profile.rate * identity.speakingRate;
       utterance.pitch = profile.pitch * identity.pitch;
-      
+
+      // Track which utterance is current so a late onend from an
+      // interrupted utterance cannot clear the state of its successor.
+      const seq = ++utteranceSeqRef.current;
+      currentUtteranceRef.current = normalizeSpeech(text);
+
       utterance.onstart = () => {
         setIsSpeaking(true);
-        if (recognitionRef.current) {
+        // The microphone stays ON while the agent speaks when barge-in
+        // is allowed — that is what makes interruption possible. It is
+        // only paused while speaking when barge-in is switched off.
+        if (!allowInterruptsRef.current && recognitionRef.current) {
           try {
             recognitionRef.current.stop();
           } catch (e) {}
         }
       };
-      
-      utterance.onend = () => {
-        setIsSpeaking(false);
-        // Restart listening after agent finishes
-        if (callStatusRef.current === 'active' && shouldListenRef.current) {
-          setTimeout(() => {
-            if (recognitionRef.current && shouldListenRef.current) {
-              try {
-                recognitionRef.current.start();
-              } catch (e) {}
-            }
-          }, 300);
+
+      const finish = () => {
+        if (seq === utteranceSeqRef.current) {
+          setIsSpeaking(false);
+          currentUtteranceRef.current = '';
+          // With barge-in off the mic was paused; resume it now.
+          if (!allowInterruptsRef.current) ensureListening();
         }
         resolve();
       };
-      
-      utterance.onerror = () => {
-        setIsSpeaking(false);
-        if (callStatusRef.current === 'active' && shouldListenRef.current) {
-          setTimeout(() => {
-            if (recognitionRef.current && shouldListenRef.current) {
-              try {
-                recognitionRef.current.start();
-              } catch (e) {}
-            }
-          }, 300);
-        }
-        resolve();
-      };
-      
+      utterance.onend = finish;
+      utterance.onerror = finish;
+
       window.speechSynthesis.speak(utterance);
     });
   };
@@ -415,6 +433,7 @@ export default function RealCallSimulator() {
     recognition.lang = 'en-US';
 
     recognition.onstart = () => {
+      recognitionRunningRef.current = true;
       setIsListening(true);
       setError(null);
     };
@@ -422,7 +441,7 @@ export default function RealCallSimulator() {
     recognition.onresult = (event: any) => {
       let interim = '';
       let final = '';
-      
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const t = event.results[i][0].transcript;
         if (event.results[i].isFinal) {
@@ -431,15 +450,43 @@ export default function RealCallSimulator() {
           interim += t;
         }
       }
-      
-      setInterimTranscript(interim);
-      
-      // Barge-in: stop agent if user speaks
-      if (final && isSpeakingRef.current) {
+
+      const heard = final || interim;
+
+      // While the agent is speaking, the microphone is still live
+      // (barge-in). Decide whether what was heard is the caller
+      // interrupting, or just the agent's own voice echoing back
+      // from the speakers.
+      if (isSpeakingRef.current && heard.trim()) {
+        const heardNorm = normalizeSpeech(heard);
+        const uttNorm = currentUtteranceRef.current;
+        const isEcho = heardNorm.length >= 3 && uttNorm !== '' && uttNorm.includes(heardNorm);
+        if (isEcho) {
+          // The agent hearing itself: never show it, never answer it.
+          if (!final) setInterimTranscript('');
+          return;
+        }
+        if (!allowInterruptsRef.current) {
+          // Barge-in is off: the agent finishes its turn undisturbed.
+          return;
+        }
+        // BARGE-IN: the caller is speaking over the agent — stop the
+        // agent immediately, and take the caller's finished sentence
+        // as the next turn.
         window.speechSynthesis.cancel();
         setIsSpeaking(false);
+        if (final) {
+          setTranscript(final);
+          setInterimTranscript('');
+          handleCallerSpeech(final);
+        } else {
+          setInterimTranscript(interim);
+        }
+        return;
       }
-      
+
+      setInterimTranscript(interim);
+
       if (final) {
         setTranscript(final);
         handleCallerSpeech(final);
@@ -448,35 +495,26 @@ export default function RealCallSimulator() {
 
     recognition.onerror = (event: any) => {
       console.error('Speech recognition error:', event.error);
-      if (event.error === 'not-allowed') {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         setError('Microphone access denied. Please allow microphone access.');
+        shouldListenRef.current = false;
         setIsListening(false);
-      } else if (event.error === 'no-speech') {
-        // Auto-restart on no-speech
-        if (callStatusRef.current === 'active' && shouldListenRef.current && !isSpeakingRef.current) {
-          setTimeout(() => {
-            try {
-              recognition.start();
-            } catch (e) {}
-          }, 100);
-        }
-      } else if (event.error !== 'aborted') {
-        setError(`Speech error: ${event.error}`);
       }
+      // 'no-speech', 'aborted', 'network' and friends are transient:
+      // recognition.onend fires next and restarts listening.
     };
 
     recognition.onend = () => {
-      // Auto-restart if call is active and should be listening
-      if (callStatusRef.current === 'active' && shouldListenRef.current && !isSpeakingRef.current) {
-        setTimeout(() => {
-          try {
-            recognition.start();
-          } catch (e) {}
-        }, 100);
+      recognitionRunningRef.current = false;
+      setInterimTranscript('');
+      // Keep listening for the whole call — whether or not the agent
+      // is speaking right now. Previously the restart was skipped
+      // while the agent spoke, which could leave the call deaf.
+      if (callStatusRef.current === 'active' && shouldListenRef.current) {
+        setTimeout(() => ensureListening(), 150);
       } else {
         setIsListening(false);
       }
-      setInterimTranscript('');
     };
 
     return recognition;
@@ -527,16 +565,22 @@ export default function RealCallSimulator() {
     shouldListenRef.current = false;
     
     await initMicrophone();
-    
-    // Initialize recognition
-    if (!recognitionRef.current) {
-      recognitionRef.current = initRecognition();
+
+    // Fresh recognition for every call, so its handlers always use
+    // the latest knowledge base and settings.
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+      recognitionRef.current = null;
     }
-    
+    recognitionRef.current = initRecognition();
+
     await new Promise(resolve => setTimeout(resolve, 2000));
-    
+
     setCallStatus('active');
-    
+    callStatusRef.current = 'active';
+
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     setMessages([{
       id: 1,
@@ -544,40 +588,34 @@ export default function RealCallSimulator() {
       text: `Call connected with ${identity.agentName} at ${identity.companyName}`,
       timestamp: now,
     }]);
-    
-    await new Promise(resolve => setTimeout(resolve, 500));
-    await speakText(behavior.greeting);
-    
+
+    // Start listening BEFORE the greeting is spoken: the caller can
+    // interrupt even the greeting, and from here on the microphone
+    // lifecycle no longer depends on the agent's speech at all.
+    shouldListenRef.current = true;
+    ensureListening();
+
     setMessages(prev => [...prev, {
       id: 2,
       sender: 'agent',
       text: behavior.greeting,
       timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     }]);
-    
-    // Start listening after greeting
-    shouldListenRef.current = true;
-    setTimeout(() => {
-      if (recognitionRef.current && callStatusRef.current === 'active') {
-        try {
-          recognitionRef.current.start();
-        } catch (e) {
-          console.log('Recognition already started');
-        }
-      }
-    }, 500);
+
+    await speakText(behavior.greeting);
   };
 
   // End call
   const endCall = async () => {
     shouldListenRef.current = false;
-    
+    currentUtteranceRef.current = '';
+
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
       } catch (e) {}
     }
-    
+
     window.speechSynthesis.cancel();
     stopMicrophone();
     
@@ -614,6 +652,7 @@ export default function RealCallSimulator() {
     setIsListening(false);
     setIsSpeaking(false);
     shouldListenRef.current = false;
+    currentUtteranceRef.current = '';
   };
 
   // Idle state
