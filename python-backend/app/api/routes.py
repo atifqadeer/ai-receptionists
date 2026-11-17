@@ -4,6 +4,7 @@ API Routes - All endpoint definitions for the AI Receptionist Hub
 
 import uuid
 from datetime import datetime
+from xml.sax.saxutils import escape
 from typing import Optional, List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from loguru import logger
@@ -118,13 +119,16 @@ async def end_call(request: Request, call_id: str):
     agent = request.app.state.ai_agent
     
     log = await call_manager.end_call(call_id)
-    agent.end_call(call_id)
-    
+    summary = agent.end_call(call_id)
+
     farewell = agent.get_config().farewell
     return {
         "status": "ended",
         "call_log": log,
-        "farewell": farewell
+        "farewell": farewell,
+        # The role discussed and the caller's answers to its screening questions.
+        "role": summary.get("role"),
+        "screening_answers": summary.get("screening_answers", {}),
     }
 
 
@@ -418,7 +422,7 @@ async def twilio_gather(request: Request):
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>{response.message}</Say>
+    <Say>{escape(response.message or "")}</Say>
     <Gather input="speech" action="/webhooks/twilio/gather" method="POST" timeout="5">
         <Say>Is there anything else I can help you with?</Say>
     </Gather>

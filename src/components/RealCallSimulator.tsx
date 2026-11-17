@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
+import { syncAgentSettings, startAgentCall, askAgent, endAgentCall } from '../utils/agentApi';
 
 interface CallMessage {
   id: number;
@@ -13,6 +15,14 @@ interface CallMessage {
 // hearing the agent's own voice coming out of the speakers?
 const normalizeSpeech = (t: string) =>
   t.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// Key words of a question, for the offline FAQ match: filler words like
+// "what" and "your" are dropped, so "what is your email" no longer
+// matches the FAQ "What are your business hours?".
+const FAQ_STOPWORDS = new Set(['what', 'when', 'where', 'which', 'your', 'yours', 'about', 'there', 'their', 'this', 'that', 'with', 'have', 'does', 'will', 'would', 'could', 'should', 'please', 'thanks', 'thank', 'the', 'and', 'you', 'are', 'how', 'can', 'for', 'our', 'any']);
+const keyWords = (t: string) => t.toLowerCase().split(/[^a-z0-9]+/)
+  .filter(w => w.length >= 3 && !FAQ_STOPWORDS.has(w))
+  .map(w => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w));
 
 const VOICE_PROFILES: Record<string, { rate: number; pitch: number; gender: 'male' | 'female' }> = {
   skylar: { rate: 1.0, pitch: 1.15, gender: 'female' },
@@ -52,6 +62,10 @@ export default function RealCallSimulator() {
   const currentUtteranceRef = useRef('');
   const utteranceSeqRef = useRef(0);
   const allowInterruptsRef = useRef(true);
+  // Backend call session: when set, every caller question is answered by
+  // the backend agent from the knowledge base (and the AI model, when an
+  // OpenAI key is configured). null = backend offline, answer locally.
+  const backendCallIdRef = useRef<string | null>(null);
 
   // Keep recognition running for the whole call. It is restarted from
   // recognition.onend whenever the browser stops it (silence timeouts,
@@ -66,30 +80,11 @@ export default function RealCallSimulator() {
     } catch (e) { /* already starting */ }
   };
 
-  const [identity] = useLocalStorage('agent-identity', {
-    agentName: 'Aria',
-    companyName: 'TechCorp Solutions',
-    voice: 'skylar',
-    speakingRate: 1.0,
-    pitch: 1.0,
-  });
+  const [identity] = useLocalStorage('agent-identity', DEFAULT_IDENTITY);
 
-  const [behavior] = useLocalStorage('agent-behavior', {
-    greeting: 'Hello! Thank you for calling. I\'m your AI assistant. How can I help you today?',
-    farewell: 'Thank you for calling! Have a wonderful day.',
-    allowInterrupts: true,
-  });
+  const [behavior] = useLocalStorage('agent-behavior', DEFAULT_BEHAVIOR);
 
-  const [knowledge] = useLocalStorage('agent-knowledge', {
-    businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
-    phone: '+1 (555) 123-4567',
-    email: 'support@techcorp.com',
-    address: '',
-    services: 'Web Development, Mobile Apps, Cloud Solutions',
-    companyInfo: '',
-    documents: [] as Array<{ name: string; content: string }>,
-    faqs: [] as Array<{ q: string; a: string }>,
-  });
+  const [knowledge] = useLocalStorage('agent-knowledge', DEFAULT_KNOWLEDGE);
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -158,14 +153,20 @@ export default function RealCallSimulator() {
     const lower = text.toLowerCase();
     
     if (knowledge.faqs && knowledge.faqs.length > 0) {
+      // Best-matching FAQ, and it must cover most of the FAQ's key words.
+      const msgWords = new Set(keyWords(text));
+      let bestQ: string | null = null;
+      let bestScore = 0;
       for (const faq of knowledge.faqs) {
-        const faqLower = faq.q.toLowerCase();
-        const words = faqLower.split(/\s+/).filter(w => w.length > 3);
-        const matchCount = words.filter(w => lower.includes(w)).length;
-        if (matchCount >= Math.min(2, words.length)) {
-          return `FAQ:${faq.q}`;
-        }
+        if (!faq.q?.trim() || !faq.a?.trim()) continue;
+        const qWords = Array.from(new Set(keyWords(faq.q)));
+        if (qWords.length === 0) continue;
+        const shared = qWords.filter(w => msgWords.has(w)).length;
+        if (shared < Math.min(2, qWords.length) || shared * 3 < qWords.length * 2) continue;
+        const score = shared / new Set([...qWords, ...msgWords]).size;
+        if (score > bestScore) { bestQ = faq.q; bestScore = score; }
       }
+      if (bestQ) return `FAQ:${bestQ}`;
     }
     
     if (lower.includes('appointment') || lower.includes('book') || lower.includes('schedule') || lower.includes('meeting')) return 'Appointment Booking';
@@ -333,12 +334,24 @@ export default function RealCallSimulator() {
     }]);
     
     setTranscript('');
-    
-    const intent = detectIntent(text);
-    const response = generateResponse(text, intent);
-    
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
+
+    // The backend agent answers from the knowledge base. Only when it
+    // cannot be reached does the call fall back to in-browser matching.
+    let response: string;
+    let intent: string;
+    const backendAnswer = backendCallIdRef.current
+      ? await askAgent(backendCallIdRef.current, text)
+      : null;
+    if (backendAnswer) {
+      response = backendAnswer.message;
+      intent = backendAnswer.intent;
+    } else {
+      intent = detectIntent(text);
+      response = generateResponse(text, intent);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if (callStatusRef.current !== 'active') return;
+
     setMessages(prev => [...prev, {
       id: Date.now() + 1,
       sender: 'agent',
@@ -566,6 +579,14 @@ export default function RealCallSimulator() {
     
     await initMicrophone();
 
+    // Send the current Agent Setup knowledge to the backend and open a
+    // backend call session; the agent answers from that knowledge.
+    backendCallIdRef.current = null;
+    const synced = await syncAgentSettings({ identity, behavior, knowledge });
+    if (synced) {
+      backendCallIdRef.current = await startAgentCall(callerName, phoneNumber);
+    }
+
     // Fresh recognition for every call, so its handlers always use
     // the latest knowledge base and settings.
     if (recognitionRef.current) {
@@ -586,6 +607,13 @@ export default function RealCallSimulator() {
       id: 1,
       sender: 'system',
       text: `Call connected with ${identity.agentName} at ${identity.companyName}`,
+      timestamp: now,
+    }, {
+      id: 3,
+      sender: 'system',
+      text: backendCallIdRef.current
+        ? 'AI agent connected: answers come from your knowledge base.'
+        : 'Backend not reachable (http://localhost:8000): using basic offline answers. Start the backend for reliable knowledge-base answers.',
       timestamp: now,
     }]);
 
@@ -609,6 +637,10 @@ export default function RealCallSimulator() {
   const endCall = async () => {
     shouldListenRef.current = false;
     currentUtteranceRef.current = '';
+    if (backendCallIdRef.current) {
+      endAgentCall(backendCallIdRef.current);
+      backendCallIdRef.current = null;
+    }
 
     if (recognitionRef.current) {
       try {

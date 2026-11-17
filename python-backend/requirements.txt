@@ -21,6 +21,21 @@ aiosqlite==0.19.0
 # HTTP Client
 httpx==0.26.0
 
+# Outbound calling: Vonage request signing, and time zones for calling
+# hours (Windows has no built-in time zone database)
+PyJWT[crypto]==2.9.0
+tzdata==2024.2
+
+# Direct SIP calling ("SIP Account" provider): SIP phone + offline speech
+# recognition. pyVoIP is GPL-3.0. The Vosk model goes in models/:
+# https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+pyVoIP==1.6.8
+vosk==0.3.45
+# Accurate speech-to-text for SIP calls (Vosk alone mishears accents on a
+# phone line). Model goes in models/whisper-small.en (~480 MB):
+#   python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small.en', local_dir='models/whisper-small.en')"
+faster-whisper==1.0.3
+
 # Logging
 loguru==0.7.2
 

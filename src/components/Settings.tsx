@@ -226,6 +226,12 @@ export default function Settings() {
           {/* Telephony Settings */}
           {activeSection === 'telephony' && (
             <div className="space-y-6">
+              {/* This tab is reference information only; it is not used for calls. */}
+              <div className="bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm px-4 py-3 rounded-lg">
+                <i className="fa-solid fa-triangle-exclamation mr-2"></i>
+                This page is an overview of providers only: details entered here are <strong>not used for calls</strong>.
+                Set up the VoIP provider or SIP account the agent calls with in <strong>Agent Setup › VoIP & Calling</strong>.
+              </div>
               {/* Provider Selection Header */}
               <div className="bg-gradient-to-r from-emerald-600/10 to-teal-600/10 rounded-xl border border-emerald-500/20 p-5">
                 <div className="flex items-start gap-4">

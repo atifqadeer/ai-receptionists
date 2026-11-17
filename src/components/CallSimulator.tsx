@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
+import { syncAgentSettings, startAgentCall, askAgent, endAgentCall } from '../utils/agentApi';
 
 interface Message {
   id: number;
@@ -18,33 +20,11 @@ const KB_STOPWORDS = new Set([
 
 export default function CallSimulator() {
   // Load configurations from localStorage (shared with Agent Setup)
-  const [identity] = useLocalStorage('agent-identity', {
-    agentName: 'Aria',
-    companyName: 'TechCorp Solutions',
-    voice: 'skylar',
-  });
+  const [identity] = useLocalStorage('agent-identity', DEFAULT_IDENTITY);
 
-  const [behavior, setBehavior] = useLocalStorage('agent-behavior', {
-    greeting: "Hello! Thank you for calling TechCorp Solutions. I'm Aria, your AI assistant. How can I help you today?",
-    farewell: 'Thank you for calling! Have a wonderful day.',
-    holdMessage: 'Thank you for your patience. I\'m looking into that for you right now.',
-    transferPhrase: 'Let me connect you with a specialist who can better assist you.',
-    maxCallDuration: 15,
-    silenceTimeout: 8,
-    allowInterrupts: true,
-    personality: 'professional',
-  });
+  const [behavior, setBehavior] = useLocalStorage('agent-behavior', DEFAULT_BEHAVIOR);
 
-  const [knowledge] = useLocalStorage('agent-knowledge', {
-    businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
-    phone: '+1 (555) 123-4567',
-    email: 'support@techcorp.com',
-    address: '',
-    services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
-    companyInfo: '',
-    documents: [] as Array<{ name: string; content: string }>,
-    faqs: [] as Array<{ q: string; a: string }>,
-  });
+  const [knowledge] = useLocalStorage('agent-knowledge', DEFAULT_KNOWLEDGE);
 
   // Local state for editing greeting
   const [editingGreeting, setEditingGreeting] = useState(false);
@@ -241,6 +221,10 @@ export default function CallSimulator() {
     return agentResponses['default'];
   };
 
+  // Backend call session: every question goes to the backend agent,
+  // which answers from the knowledge base; null = backend offline.
+  const backendCallIdRef = useRef<string | null>(null);
+
   const sendMessage = (text: string) => {
     if (!text.trim() || callStatus !== 'active') return;
 
@@ -256,8 +240,13 @@ export default function CallSimulator() {
     setInput('');
     setIsTyping(true);
 
-    setTimeout(() => {
-      const response = getResponse(text);
+    const reply = async () => {
+      const backendAnswer = backendCallIdRef.current
+        ? await askAgent(backendCallIdRef.current, text.trim())
+        : null;
+      const response = backendAnswer
+        ? { text: backendAnswer.message, intent: backendAnswer.intent }
+        : getResponse(text);
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
         sender: 'agent',
@@ -266,10 +255,16 @@ export default function CallSimulator() {
         intent: response.intent
       }]);
       setIsTyping(false);
-    }, 1200 + Math.random() * 800);
+    };
+    if (backendCallIdRef.current) reply();
+    else setTimeout(reply, 1200 + Math.random() * 800);
   };
 
   const endCall = () => {
+    if (backendCallIdRef.current) {
+      endAgentCall(backendCallIdRef.current);
+      backendCallIdRef.current = null;
+    }
     setCallStatus('ended');
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     setMessages(prev => [
@@ -289,7 +284,11 @@ export default function CallSimulator() {
     ]);
   };
 
-  const startCall = () => {
+  const startCall = async () => {
+    backendCallIdRef.current = null;
+    if (await syncAgentSettings({ identity, behavior, knowledge })) {
+      backendCallIdRef.current = await startAgentCall();
+    }
     setCallStatus('active');
     setCallDuration(0);
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -299,6 +298,14 @@ export default function CallSimulator() {
         sender: 'system', 
         text: `Call started - ${identity.agentName} from ${identity.companyName} is now active`, 
         timestamp: now 
+      },
+      {
+        id: 3,
+        sender: 'system',
+        text: backendCallIdRef.current
+          ? 'AI agent connected: answers come from your knowledge base.'
+          : 'Backend not reachable (http://localhost:8000): using basic offline answers.',
+        timestamp: now
       },
       { 
         id: 2, 

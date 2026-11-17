@@ -4,11 +4,13 @@ import SetupForm from './components/SetupForm';
 import Automation from './components/Automation';
 import CallSimulator from './components/CallSimulator';
 import RealCallSimulator from './components/RealCallSimulator';
+import OutboundCalls from './components/OutboundCalls';
+import InboundCalls from './components/InboundCalls';
 import Analytics from './components/Analytics';
 import Settings from './components/Settings';
 import { downloadPythonBackend } from './utils/downloadZip';
 
-type Page = 'dashboard' | 'setup' | 'automation' | 'simulator' | 'realcall' | 'analytics' | 'settings';
+type Page = 'dashboard' | 'setup' | 'automation' | 'simulator' | 'realcall' | 'jobcalls' | 'inbound' | 'analytics' | 'settings';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -35,6 +37,8 @@ function App() {
     { id: 'setup', label: 'Agent Setup', icon: 'fa-robot' },
     { id: 'automation', label: 'Automation', icon: 'fa-gears' },
     { id: 'realcall', label: 'Make a Call', icon: 'fa-phone-volume' },
+    { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset' },
+    { id: 'jobcalls', label: 'Job Calls', icon: 'fa-briefcase' },
     { id: 'simulator', label: 'Text Simulator', icon: 'fa-comments' },
     { id: 'analytics', label: 'Analytics', icon: 'fa-chart-bar' },
     { id: 'settings', label: 'Settings', icon: 'fa-sliders' },
@@ -46,6 +50,8 @@ function App() {
       case 'setup': return <SetupForm />;
       case 'automation': return <Automation />;
       case 'realcall': return <RealCallSimulator />;
+      case 'jobcalls': return <OutboundCalls />;
+      case 'inbound': return <InboundCalls />;
       case 'simulator': return <CallSimulator />;
       case 'analytics': return <Analytics />;
       case 'settings': return <Settings />;
@@ -120,6 +126,8 @@ function App() {
             <h2 className="text-xl font-bold text-white capitalize">
               {currentPage === 'simulator' ? 'Text Call Simulator' : 
                currentPage === 'realcall' ? 'Make a Voice Call' : 
+               currentPage === 'jobcalls' ? 'Job Calls' : 
+               currentPage === 'inbound' ? 'Inbound Calls' : 
                currentPage}
             </h2>
             <p className="text-sm text-gray-400">
@@ -127,6 +135,8 @@ function App() {
               {currentPage === 'setup' && 'Configure your AI agent personality and behavior'}
               {currentPage === 'automation' && 'Set up call routing and automated workflows'}
               {currentPage === 'realcall' && 'Speak to the AI agent using your microphone'}
+              {currentPage === 'inbound' && 'Every call the agent answered on your inbound extension: transcripts, recordings and history'}
+              {currentPage === 'jobcalls' && 'The AI agent calls applicants about matching jobs from your CRM or a CSV'}
               {currentPage === 'simulator' && 'Test your AI agent with text-based conversations'}
               {currentPage === 'analytics' && 'View call history and performance metrics'}
               {currentPage === 'settings' && 'System configuration and integrations'}

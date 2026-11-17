@@ -1,48 +1,28 @@
 import { useState, useRef } from 'react';
 import VoicePreview from './VoicePreview';
+import VoipSettings, { VoipSection } from './VoipSettings';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
+import { syncAgentSettings } from '../utils/agentApi';
 
 export default function SetupForm() {
   const [activeTab, setActiveTab] = useState('identity');
   const [saved, setSaved] = useState(false);
 
   // Use localStorage hook for persistence
-  const [identity, setIdentity] = useLocalStorage('agent-identity', {
-    agentName: 'Aria',
-    companyName: 'TechCorp Solutions',
-    language: 'English',
-    voice: 'skylar',
-    speakingRate: 1.0,
-    pitch: 1.0,
-  });
+  const [identity, setIdentity] = useLocalStorage('agent-identity', DEFAULT_IDENTITY);
 
-  const [behavior, setBehavior] = useLocalStorage('agent-behavior', {
-    greeting: 'Hello! Thank you for calling TechCorp Solutions. I\'m Aria, your AI assistant. How can I help you today?',
-    farewell: 'Thank you for calling! Have a wonderful day.',
-    holdMessage: 'Thank you for your patience. I\'m looking into that for you right now.',
-    transferPhrase: 'Let me connect you with a specialist who can better assist you.',
-    maxCallDuration: 15,
-    silenceTimeout: 8,
-    allowInterrupts: true,
-    personality: 'professional',
-  });
+  const [behavior, setBehavior] = useLocalStorage('agent-behavior', DEFAULT_BEHAVIOR);
 
-  const [knowledge, setKnowledge] = useLocalStorage('agent-knowledge', {
-    businessHours: 'Monday to Friday, 9:00 AM to 6:00 PM EST',
-    address: '123 Innovation Drive, Suite 400, San Francisco, CA 94102',
-    phone: '+1 (555) 123-4567',
-    email: 'support@techcorp.com',
-    services: 'Web Development, Mobile Apps, Cloud Solutions, AI Integration',
-    companyInfo: 'TechCorp Solutions is a software company based in San Francisco, California.\nWe build web applications, mobile apps, cloud solutions and AI integrations for startups and enterprises.\nOur team has more than 40 engineers, designers and project managers.\nWe offer a free 30-minute consultation for every new project.\nA basic business website starts at $2,500; full project pricing depends on the scope.\nEvery project includes 3 months of free support after launch.\nTo start a project, email support@techcorp.com or call +1 (555) 123-4567.',
-    documents: [] as Array<{ name: string; content: string }>,
-    faqs: [
-      { q: 'What are your business hours?', a: 'We are open Monday to Friday, 9 AM to 6 PM EST.' },
-      { q: 'How do I book an appointment?', a: 'I can help you book an appointment right now. What date and time works best for you?' },
-      { q: 'What services do you offer?', a: 'We offer web development, mobile apps, cloud solutions, and AI integration services.' },
-    ],
-  });
+  const [knowledge, setKnowledge] = useLocalStorage('agent-knowledge', DEFAULT_KNOWLEDGE);
 
-  const handleSave = () => {
+  // Saving sends the setup to the backend agent, which answers calls
+  // from it. Previously this only showed the message and the backend
+  // kept its built-in defaults.
+  const [syncWarning, setSyncWarning] = useState('');
+  const handleSave = async () => {
+    const ok = await syncAgentSettings({ identity, behavior, knowledge });
+    setSyncWarning(ok ? '' : 'Saved in this browser, but the backend (http://localhost:8000) is not running, so the AI agent could not be updated. Start the backend and save again.');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -84,7 +64,12 @@ export default function SetupForm() {
     { id: 'identity', label: 'Identity & Voice', icon: 'fa-id-badge' },
     { id: 'behavior', label: 'Behavior & Scripts', icon: 'fa-comments' },
     { id: 'knowledge', label: 'Knowledge Base', icon: 'fa-book' },
+    { id: 'provider', label: 'SIP / VoIP Account', icon: 'fa-server', voip: true },
+    { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset', voip: true },
+    { id: 'rules', label: 'Outbound Calling', icon: 'fa-clock', voip: true },
+    { id: 'voice', label: 'Call Voice & CRM', icon: 'fa-microphone-lines', voip: true },
   ];
+  const isVoip = !!tabs.find((t) => t.id === activeTab)?.voip;
 
   return (
     <div className="space-y-6">
@@ -95,12 +80,19 @@ export default function SetupForm() {
           <span className="text-sm font-medium">Configuration saved successfully!</span>
         </div>
       )}
+      {syncWarning && (
+        <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm px-4 py-3 rounded-lg flex items-start gap-2">
+          <i className="fa-solid fa-triangle-exclamation mt-0.5"></i>
+          <span>{syncWarning}</span>
+        </div>
+      )}
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-800 pb-2">
-        {tabs.map((tab) => (
+      <div className="flex flex-wrap items-center gap-2 border-b border-gray-800 pb-2">
+        {tabs.map((tab, i) => (
+          <span key={tab.id} className="contents">
+          {i > 0 && tab.voip && !tabs[i - 1].voip && <span className="w-px h-6 bg-gray-700 mx-1" title="Calling (saved with Save VoIP Settings)"></span>}
           <button
-            key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
               activeTab === tab.id
@@ -111,6 +103,7 @@ export default function SetupForm() {
             <i className={`fa-solid ${tab.icon}`}></i>
             {tab.label}
           </button>
+          </span>
         ))}
       </div>
 
@@ -538,7 +531,11 @@ export default function SetupForm() {
         </div>
       )}
 
+      {/* VoIP Tab: saved separately, to the backend */}
+      {isVoip && <VoipSettings section={activeTab as VoipSection} />}
+
       {/* Save Button */}
+      {!isVoip && (
       <div className="flex justify-end gap-3">
         <button className="px-6 py-2.5 rounded-lg border border-gray-700 text-sm text-gray-300 hover:bg-gray-800 transition-all">
           Reset to Default
@@ -551,6 +548,7 @@ export default function SetupForm() {
           Save Configuration
         </button>
       </div>
+      )}
     </div>
   );
 }
