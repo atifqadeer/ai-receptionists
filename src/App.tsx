@@ -1,16 +1,14 @@
 import { useState } from 'react';
 import Dashboard from './components/Dashboard';
-import SetupForm from './components/SetupForm';
-import Automation from './components/Automation';
 import CallSimulator from './components/CallSimulator';
 import RealCallSimulator from './components/RealCallSimulator';
 import OutboundCalls from './components/OutboundCalls';
 import InboundCalls from './components/InboundCalls';
 import Analytics from './components/Analytics';
-import Settings from './components/Settings';
+import SettingsHub from './components/SettingsHub';
 import { downloadPythonBackend } from './utils/downloadZip';
 
-type Page = 'dashboard' | 'setup' | 'automation' | 'simulator' | 'realcall' | 'jobcalls' | 'inbound' | 'analytics' | 'settings';
+type Page = 'dashboard' | 'simulator' | 'realcall' | 'jobcalls' | 'inbound' | 'analytics' | 'settings';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -34,8 +32,6 @@ function App() {
 
   const navItems: { id: Page; label: string; icon: string }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line' },
-    { id: 'setup', label: 'Agent Setup', icon: 'fa-robot' },
-    { id: 'automation', label: 'Automation', icon: 'fa-gears' },
     { id: 'realcall', label: 'Make a Call', icon: 'fa-phone-volume' },
     { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset' },
     { id: 'jobcalls', label: 'Job Calls', icon: 'fa-briefcase' },
@@ -47,14 +43,12 @@ function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'dashboard': return <Dashboard />;
-      case 'setup': return <SetupForm />;
-      case 'automation': return <Automation />;
       case 'realcall': return <RealCallSimulator />;
       case 'jobcalls': return <OutboundCalls />;
       case 'inbound': return <InboundCalls />;
       case 'simulator': return <CallSimulator />;
       case 'analytics': return <Analytics />;
-      case 'settings': return <Settings />;
+      case 'settings': return <SettingsHub />;
       default: return <Dashboard />;
     }
   };
@@ -132,14 +126,12 @@ function App() {
             </h2>
             <p className="text-sm text-gray-400">
               {currentPage === 'dashboard' && 'Overview of your AI receptionist performance'}
-              {currentPage === 'setup' && 'Configure your AI agent personality and behavior'}
-              {currentPage === 'automation' && 'Set up call routing and automated workflows'}
-              {currentPage === 'realcall' && 'Speak to the AI agent using your microphone'}
+              {currentPage === 'realcall' && 'Dial any number for the AI agent to call, or test it in your browser'}
               {currentPage === 'inbound' && 'Every call the agent answered on your inbound extension: transcripts, recordings and history'}
               {currentPage === 'jobcalls' && 'The AI agent calls applicants about matching jobs from your CRM or a CSV'}
               {currentPage === 'simulator' && 'Test your AI agent with text-based conversations'}
               {currentPage === 'analytics' && 'View call history and performance metrics'}
-              {currentPage === 'settings' && 'System configuration and integrations'}
+              {currentPage === 'settings' && 'Agent, calling, automation and system settings in one place'}
             </p>
           </div>
           <div className="flex items-center gap-4">

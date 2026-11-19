@@ -5,8 +5,11 @@ import { useLocalStorage } from '../hooks/useLocalStorage';
 import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
 import { syncAgentSettings } from '../utils/agentApi';
 
-export default function SetupForm() {
-  const [activeTab, setActiveTab] = useState('identity');
+// `section` is set when this form is shown inside the unified Settings
+// page, which draws its own tabs; the built-in tab bar is then hidden.
+export default function SetupForm({ section }: { section?: string } = {}) {
+  const [ownTab, setActiveTab] = useState('identity');
+  const activeTab = section ?? ownTab;
   const [saved, setSaved] = useState(false);
 
   // Use localStorage hook for persistence
@@ -88,6 +91,7 @@ export default function SetupForm() {
       )}
 
       {/* Tabs */}
+      {!section && (
       <div className="flex flex-wrap items-center gap-2 border-b border-gray-800 pb-2">
         {tabs.map((tab, i) => (
           <span key={tab.id} className="contents">
@@ -106,6 +110,7 @@ export default function SetupForm() {
           </span>
         ))}
       </div>
+      )}
 
       {/* Identity Tab */}
       {activeTab === 'identity' && (
@@ -155,6 +160,12 @@ export default function SetupForm() {
             <h3 className="text-lg font-semibold text-white flex items-center gap-2">
               <i className="fa-solid fa-microphone text-violet-400"></i>
               Voice Settings
+              {(identity.speakingRate !== 1 || identity.pitch !== 1) && (
+                <button type="button" onClick={() => setIdentity({ ...identity, speakingRate: 1, pitch: 1 })}
+                  className="ml-auto text-xs font-normal px-3 py-1 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:border-violet-500">
+                  <i className="fa-solid fa-rotate-left mr-1.5"></i>Reset voice
+                </button>
+              )}
             </h3>
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1.5">
@@ -163,8 +174,8 @@ export default function SetupForm() {
               <input
                 type="range"
                 min="0.5"
-                max="2.0"
-                step="0.1"
+                max="1.5"
+                step="0.05"
                 value={identity.speakingRate}
                 onChange={(e) => setIdentity({ ...identity, speakingRate: parseFloat(e.target.value) })}
                 className="w-full accent-violet-500"
@@ -182,8 +193,8 @@ export default function SetupForm() {
               <input
                 type="range"
                 min="0.5"
-                max="2.0"
-                step="0.1"
+                max="1.5"
+                step="0.05"
                 value={identity.pitch}
                 onChange={(e) => setIdentity({ ...identity, pitch: parseFloat(e.target.value) })}
                 className="w-full accent-violet-500"

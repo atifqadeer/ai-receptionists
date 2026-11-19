@@ -28,6 +28,9 @@ export interface TelephonySettings {
   language: string;
   voice: string;
   result_webhook_url: string;
+  crm_api_url: string;
+  crm_api_key: string;
+  crm_poll_minutes: number;
   sip_domain: string;
   webhook_token: string;
   inbound: InboundSettings;
@@ -63,7 +66,9 @@ export interface InboundCall {
   caller_number: string;
   caller_name: string;
   extension: string;
-  status: 'ringing' | 'in_progress' | 'completed' | 'failed';
+  status: 'dialing' | 'ringing' | 'in_progress' | 'completed' | 'failed' | 'no_answer' | 'cancelled';
+  direction?: 'inbound' | 'outbound';
+  reason?: string;
   started_at: string;
   answered_at: string | null;
   ended_at: string | null;
@@ -128,11 +133,27 @@ export interface CallsResponse {
   webhook_token: string;
 }
 
+// A backend that accepts the connection but never answers (frozen or
+// paused) would otherwise leave pages on "Loading…" forever.
+const TIMEOUT_MS = 20000;
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: init.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...(init.headers || {}) },
-  });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      signal: ctl.signal,
+      headers: init.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...(init.headers || {}) },
+    });
+  } catch (e: any) {
+    throw new Error(e?.name === 'AbortError'
+      ? `The backend at ${API_BASE} is not responding (no answer in ${TIMEOUT_MS / 1000}s). Restart it with start-app.bat.`
+      : `Could not reach the backend at ${API_BASE}. Start it with start-app.bat.`);
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any)?.detail || `Request failed (${res.status})`);
   return data as T;
@@ -148,9 +169,27 @@ export const telephonyApi = {
   inboundCall: (id: string) => call<InboundCallDetail>(`/api/telephony/inbound/calls/${id}`),
   deleteInboundCall: (id: string) => call(`/api/telephony/inbound/calls/${id}`, { method: 'DELETE' }),
   inboundRecordingUrl: (id: string) => `${API_BASE}/api/telephony/inbound/calls/${id}/recording`,
+  // Make a Call dial pad: the agent phones a number over the SIP Account.
+  dialed: () => call<{ calls: InboundCall[] }>('/api/telephony/dialed'),
+  dial: (number: string, name = '', opening = '') => call<{ id: string }>('/api/telephony/dial', { method: 'POST', body: JSON.stringify({ number, name, opening }) }),
+  dialOpening: () => call<{ opening: string }>('/api/telephony/dial/opening'),
+  hangup: (id: string) => call(`/api/telephony/dialed/${id}/hangup`, { method: 'POST' }),
+  clearDialed: () => call('/api/telephony/dialed', { method: 'DELETE' }),
 };
 
+export interface CrmPull {
+  at: string;
+  url: string;
+  fetched?: number;
+  added?: number;
+  already_imported?: number;
+  rejected?: Array<{ row: number; reason: string; name: string }>;
+  error?: string;
+}
+
 export const outboundApi = {
+  crmPull: () => call<CrmPull>('/api/outbound/crm/pull', { method: 'POST' }),
+  crmStatus: () => call<{ last: CrmPull | null; imported_total: number }>('/api/outbound/crm/status'),
   list: () => call<CallsResponse>('/api/outbound/calls'),
   uploadCsv: (file: File) => {
     const form = new FormData();

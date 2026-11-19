@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
 import { syncAgentSettings, startAgentCall, askAgent, endAgentCall } from '../utils/agentApi';
+import DialPad from './DialPad';
 
 interface CallMessage {
   id: number;
@@ -570,7 +571,9 @@ export default function RealCallSimulator() {
   };
 
   // Start call
-  const startCall = async () => {
+  const startCall = async (number = phoneNumber, name = callerName) => {
+    setPhoneNumber(number);
+    setCallerName(name);
     setError(null);
     setCallStatus('dialing');
     setCallDuration(0);
@@ -584,7 +587,7 @@ export default function RealCallSimulator() {
     backendCallIdRef.current = null;
     const synced = await syncAgentSettings({ identity, behavior, knowledge });
     if (synced) {
-      backendCallIdRef.current = await startAgentCall(callerName, phoneNumber);
+      backendCallIdRef.current = await startAgentCall(name, number);
     }
 
     // Fresh recognition for every call, so its handlers always use
@@ -687,79 +690,25 @@ export default function RealCallSimulator() {
     currentUtteranceRef.current = '';
   };
 
-  // Idle state
+  // Idle state: the dial pad (real calls over SIP, or a browser test call)
   if (callStatus === 'idle') {
     return (
-      <div className="space-y-6">
-        <div className="bg-gradient-to-br from-violet-600/10 to-indigo-600/10 rounded-xl border border-violet-500/30 p-6">
-          <div className="flex items-start gap-4">
-            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center flex-shrink-0">
-              <i className="fa-solid fa-phone-volume text-white text-2xl"></i>
-            </div>
-            <div>
-              <h2 className="text-xl font-bold text-white mb-1">Make a Voice Call</h2>
-              <p className="text-sm text-gray-300">
-                Speak to {identity.agentName} using your microphone. The AI will listen automatically and respond with voice.
-              </p>
-            </div>
-          </div>
-        </div>
-
+      <div className="space-y-4">
         {(!speechRecognitionSupported || !speechSynthesisSupported) && (
-          <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/30">
+          <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
             <p className="text-sm text-amber-300 flex items-start gap-2">
               <i className="fa-solid fa-triangle-exclamation mt-0.5"></i>
-              <span>
-                {!speechRecognitionSupported && !speechSynthesisSupported 
-                  ? 'Your browser does not support speech features. Please use Chrome or Edge.'
-                  : !speechRecognitionSupported 
-                  ? 'Speech recognition not supported. Please use Chrome or Edge.'
-                  : 'Speech synthesis not supported. Please use Chrome or Edge.'}
-              </span>
+              <span>The browser test call needs speech features: please use Chrome or Edge. Real calls from the dial pad still work.</span>
             </p>
           </div>
         )}
-
-        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6">
-          <h3 className="text-lg font-semibold text-white mb-4">Call Configuration</h3>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <p className="text-xs text-gray-500">Agent</p>
-              <p className="text-white font-medium">{identity.agentName}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-500">Voice</p>
-              <p className="text-white font-medium capitalize">{identity.voice}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-500">Company</p>
-              <p className="text-white font-medium">{identity.companyName}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-500">Mode</p>
-              <p className="text-white font-medium">Browser Call</p>
-            </div>
-          </div>
-        </div>
-
-        <button
-          onClick={startCall}
-          disabled={!speechRecognitionSupported || !speechSynthesisSupported}
-          className="w-full py-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-semibold text-lg hover:from-emerald-600 hover:to-teal-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3 shadow-lg"
-        >
-          <i className="fa-solid fa-phone text-xl"></i>
-          Start Call with {identity.agentName}
-        </button>
-
-        <div className="p-4 rounded-lg bg-blue-500/5 border border-blue-500/20">
-          <p className="text-sm text-blue-300 flex items-start gap-2">
-            <i className="fa-solid fa-circle-info mt-0.5"></i>
-            <span>
-              <strong>How it works:</strong> After the call starts, just speak naturally. The AI will listen automatically, 
-              process your speech, and respond with voice. You can interrupt the AI anytime by speaking (barge-in).
-            </span>
-          </p>
-        </div>
+        <DialPad
+          agentName={identity.agentName}
+          companyName={identity.companyName}
+          voice={identity.voice}
+          browserReady={speechRecognitionSupported && speechSynthesisSupported}
+          onBrowserCall={(number, name) => startCall(number, name)}
+        />
       </div>
     );
   }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { telephonyApi, TelephonySettings } from '../utils/outboundApi';
+import { telephonyApi, outboundApi, TelephonySettings, CrmPull } from '../utils/outboundApi';
 import InboundSettings from './InboundSettings';
 
 // Agent Setup > VoIP & Calling: the VoIP provider the agent calls
@@ -18,12 +18,14 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
   const [s, setS] = useState<TelephonySettings | null>(null);
   const [loadError, setLoadError] = useState('');
   const [status, setStatus] = useState<{ ok: boolean; message: string } | null>(null);
-  const [busy, setBusy] = useState<'' | 'save' | 'test'>('');
+  const [busy, setBusy] = useState<'' | 'save' | 'test' | 'crm'>('');
+  const [crm, setCrm] = useState<{ last: CrmPull | null; imported_total: number } | null>(null);
+  useEffect(() => { outboundApi.crmStatus().then(setCrm).catch(() => {}); }, []);
 
   const load = () => {
     setLoadError('');
-    telephonyApi.get().then(setS).catch(() =>
-      setLoadError('Could not reach the backend at http://localhost:8000. Start the backend (start-app.bat) and reload this tab.'));
+    telephonyApi.get().then(setS).catch((e) =>
+      setLoadError(e?.message || 'Could not reach the backend at http://localhost:8000. Start the backend (start-app.bat) and reload this tab.'));
   };
   useEffect(load, []);
 
@@ -43,6 +45,22 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
   const set = (patch: Partial<TelephonySettings>) => setS({ ...s, ...patch });
   const setCred = (key: string, value: string) =>
     set({ credentials: { ...s.credentials, [s.provider]: { ...creds, [key]: value } } });
+
+  const fetchCrm = async () => {
+    setBusy('crm');
+    setStatus(null);
+    try {
+      await persist();
+      const r = await outboundApi.crmPull();
+      setCrm({ last: r, imported_total: (crm?.imported_total || 0) + (r.added || 0) });
+      setStatus({ ok: true, message: `CRM: ${r.fetched} applicants fetched, ${r.added} new queued on Job Calls, `
+        + `${r.already_imported} already imported${r.rejected?.length ? `, ${r.rejected.length} rejected` : ''}.` });
+    } catch (e: any) {
+      setStatus({ ok: false, message: e.message || 'Could not fetch from the CRM' });
+    } finally {
+      setBusy('');
+    }
+  };
 
   const persist = async () => {
     const { providers, configured, missing, within_calling_hours, webhook_token, ...body } = s;
@@ -250,6 +268,50 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
             <input type="text" value={s.result_webhook_url} placeholder="https://your-crm.example.com/webhooks/ai-call-result"
               onChange={(e) => set({ result_webhook_url: e.target.value })} className={input} />
             <p className="text-xs text-gray-500 mt-1">When a call finishes, its outcome (interested, not interested, call back, do not call) and transcript are POSTed here as JSON.</p>
+          </div>
+        </div>
+
+        <div className="border-t border-gray-800 pt-5 space-y-4">
+          <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+            <i className="fa-solid fa-cloud-arrow-down text-violet-400"></i>
+            Fetch applicants from your CRM
+          </h4>
+          <p className="text-xs text-gray-500 -mt-2">The agent calls your CRM's API (GET, JSON array of applicants) and queues a job call for each new applicant. Applicants already imported are not queued twice.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="md:col-span-2">
+              <label className={label}>CRM API URL</label>
+              <input type="text" value={s.crm_api_url || ''} placeholder="http://127.0.0.1:8100/api/v1/applicants?status=new"
+                onChange={(e) => set({ crm_api_url: e.target.value })} className={input} />
+            </div>
+            <div>
+              <label className={label}>CRM API key</label>
+              <input type="password" value={s.crm_api_key || ''} placeholder="sent as Authorization: Bearer …" autoComplete="new-password"
+                onChange={(e) => set({ crm_api_key: e.target.value })} className={input} />
+            </div>
+            <div>
+              <label className={label}>Fetch automatically</label>
+              <select value={s.crm_poll_minutes || 0} onChange={(e) => set({ crm_poll_minutes: Number(e.target.value) })} className={input}>
+                <option value={0}>Off (Fetch now only)</option>
+                <option value={1}>Every minute</option>
+                <option value={5}>Every 5 minutes</option>
+                <option value={15}>Every 15 minutes</option>
+                <option value={60}>Every hour</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={fetchCrm} disabled={!!busy || !(s.crm_api_url || '').trim()}
+              className="px-4 py-2 rounded-lg border border-violet-500/40 text-violet-200 text-sm hover:bg-violet-500/10 disabled:opacity-40 flex items-center gap-2">
+              <i className={`fa-solid ${busy === 'crm' ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></i>
+              Fetch now
+            </button>
+            {crm?.last && (
+              <span className={`text-xs ${crm.last.error ? 'text-red-300' : 'text-gray-400'}`}>
+                Last fetch {new Date(crm.last.at).toLocaleString()}: {crm.last.error ? crm.last.error
+                  : `${crm.last.fetched} fetched, ${crm.last.added} queued, ${crm.last.already_imported} already imported`}
+                {' · '}{crm.imported_total} imported in total
+              </span>
+            )}
           </div>
         </div>
       </div>

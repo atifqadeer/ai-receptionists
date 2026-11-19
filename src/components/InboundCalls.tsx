@@ -148,7 +148,7 @@ export default function InboundCalls() {
           line.state === 'registered' ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
             : line.state === 'error' ? 'border-red-500/30 bg-red-500/5 text-red-300' : 'border-gray-700 bg-gray-900 text-gray-400'}`}>
           <i className={`fa-solid ${line.state === 'registered' ? 'fa-signal' : line.state === 'error' ? 'fa-plug-circle-xmark' : 'fa-power-off'}`}></i>
-          <span>{line.state === 'disabled' ? 'Inbound calls are turned off. Turn them on in Agent Setup > Inbound Calls.' : line.message}</span>
+          <span>{line.state === 'disabled' ? 'Inbound calls are turned off. Turn them on in Settings › Calling › Inbound Calls.' : line.message}</span>
         </div>
       )}
 

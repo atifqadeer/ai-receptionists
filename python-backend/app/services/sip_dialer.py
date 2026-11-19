@@ -63,7 +63,7 @@ LISTEN_START_TIMEOUT = 8   # seconds of silence before "didn't catch that"
 LISTEN_MAX = 20            # longest single answer, seconds
 END_OF_SPEECH = 1.0        # silence that ends an answer, seconds
 FRAME = 160                # 20 ms of 8 kHz audio
-TTS_RATE = 1               # Windows voice speed, -10..10 (0 is its slow default)
+TTS_RATE = 0               # Windows voice speed, -10..10 (0 = the voice's natural pace)
 
 # Barge-in: the applicant talking over the agent stops the agent, and
 # what they say is answered.
@@ -101,6 +101,11 @@ $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $voices = $s.GetInstalledVoices() | Where-Object { $_.Enabled }
 $v = $null
 if ($env:TTS_VOICE) { $v = $voices | Where-Object { $_.VoiceInfo.Name -like "*$($env:TTS_VOICE)*" } | Select-Object -First 1 }
+if (-not $v -and $env:TTS_GENDER) {
+  $g = $voices | Where-Object { $_.VoiceInfo.Gender -eq $env:TTS_GENDER }
+  $v = $g | Where-Object { $_.VoiceInfo.Culture.Name -eq $env:TTS_LANG } | Select-Object -First 1
+  if (-not $v) { $v = $g | Where-Object { $_.VoiceInfo.Culture.Name -like ($env:TTS_LANG.Split('-')[0] + '-*') } | Select-Object -First 1 }
+}
 if (-not $v) { $v = $voices | Where-Object { $_.VoiceInfo.Culture.Name -eq $env:TTS_LANG } | Select-Object -First 1 }
 if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }
 $s.Rate = [int]$env:TTS_RATE
@@ -114,9 +119,30 @@ _tts_cache: dict = {}
 _tts_lock = threading.Lock()
 
 
+# The agent's voice in Agent Setup (Identity & Voice) and its gender. The
+# phone voice follows it, so "Daniel" isn't read out by a female voice.
+_AGENT_VOICE_GENDER = {"skylar": "Female", "gemma": "Female", "jacqueline": "Female",
+                       "daniel": "Male", "parker": "Male", "archie": "Male"}
+_AGENT_CONFIG = Path(__file__).resolve().parents[2] / "data" / "agent_config.json"
+_gender_cache: dict = {}
+
+
+def agent_voice_gender() -> str:
+    """"Male" / "Female" for the agent's Agent Setup voice, "" if unknown."""
+    try:
+        mtime = _AGENT_CONFIG.stat().st_mtime
+        if _gender_cache.get("mtime") != mtime:
+            voice = (json.loads(_AGENT_CONFIG.read_text(encoding="utf-8")).get("voice") or "").lower()
+            _gender_cache.update(mtime=mtime, gender=_AGENT_VOICE_GENDER.get(voice, ""))
+        return _gender_cache["gender"]
+    except (OSError, ValueError):
+        return ""
+
+
 def synthesize(text: str, language: str = "en-GB", voice: str = "") -> bytes:
     """Speech for `text` as 8 kHz G.711 µ-law, the line format (see _fix_pyvoip_audio)."""
-    key = (text, language, voice)
+    gender = agent_voice_gender()
+    key = (text, language, voice, gender, TTS_RATE)
     with _tts_lock:
         if key in _tts_cache:
             return _tts_cache[key]
@@ -124,7 +150,7 @@ def synthesize(text: str, language: str = "en-GB", voice: str = "") -> bytes:
         txt, wav = os.path.join(tmp, "say.txt"), os.path.join(tmp, "say.wav")
         Path(txt).write_text(text, encoding="utf-8")
         env = {**os.environ, "TTS_IN": txt, "TTS_OUT": wav, "TTS_LANG": language or "en-GB",
-               "TTS_RATE": str(TTS_RATE),
+               "TTS_RATE": str(TTS_RATE), "TTS_GENDER": gender,
                "TTS_VOICE": "" if (voice or "").lower().startswith("polly.") else (voice or "")}
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _TTS_SCRIPT],
                            env=env, capture_output=True, timeout=60)
@@ -367,6 +393,39 @@ def _fix_pyvoip_audio() -> None:
             packet += ULAW_SILENCE * (length - len(packet))
         return packet
 
+    def write(self, offset: int, data: bytes) -> None:
+        # pyVoIP writes each packet at its timestamp; a packet that is lost
+        # (or arrives after the next one) leaves a hole that io.BytesIO fills
+        # with 0x00 bytes, which in µ-law is a full-scale click (-32124).
+        # On a lossy line the caller's audio becomes loud noise: the
+        # recogniser hears no words and never detects the end of speech.
+        # Fill holes with µ-law silence instead; a late packet still lands
+        # in its slot. Counts gaps for the call's line-quality report.
+        self.bufferLock.acquire()
+        self.log[offset] = data
+        bufferloc = self.buffer.tell()
+        if offset < self.offset:
+            reset = abs(offset - self.offset) >= 100000
+            self.offset = offset
+            self.bufferLock.release()
+            self.rebuild(reset, offset, data)
+            return
+        pos = offset - self.offset
+        end = self.buffer.seek(0, 2)
+        if pos > end:
+            gap = pos - end
+            if gap > 8000 * 5:          # a timestamp jump, not loss: don't fill seconds of silence
+                gap = 0
+            self.gap_bytes = getattr(self, "gap_bytes", 0) + gap
+            self.buffer.write(ULAW_SILENCE * gap)
+        elif pos < end:
+            self.late_bytes = getattr(self, "late_bytes", 0) + len(data)
+        self.data_bytes = getattr(self, "data_bytes", 0) + len(data)
+        self.buffer.seek(pos, 0)
+        self.buffer.write(data)
+        self.buffer.seek(bufferloc, 0)
+        self.bufferLock.release()
+
     def parse_pcmu(self, packet) -> None:
         self.pmin.write(packet.timestamp, packet.payload)
 
@@ -380,6 +439,7 @@ def _fix_pyvoip_audio() -> None:
         return audioop.lin2alaw(audioop.ulaw2lin(packet, 2), 2)
 
     RTP.RTPPacketManager.read = read
+    RTP.RTPPacketManager.write = write
     RTP.RTPClient.parse_pcmu = parse_pcmu
     RTP.RTPClient.parse_pcma = parse_pcma
     RTP.RTPClient.encode_pcmu = encode_pcmu
@@ -439,6 +499,158 @@ def _fix_pyvoip_requests() -> None:
     SIP.SIPClient._requests_fixed = True
 
 
+_REJECTED = {486: "Busy", 600: "Busy", 603: "Declined", 480: "Unavailable", 408: "No answer",
+             487: "Cancelled", 403: "Forbidden", 484: "Incomplete number", 488: "Not acceptable"}
+
+
+def _fix_pyvoip_responses() -> None:
+    """pyVoIP 1.6.8 bugs in what it does with answers to its own calls:
+    - the PBX's "200 OK" to our CANCEL is taken as the call being
+      answered (it only looks at Call-ID): ignore 2xx answers to CANCEL;
+    - final rejections of an INVITE (486 busy, 603 declined, 487 after a
+      CANCEL, ...) are dropped: the call stays "dialling" for the whole
+      ring timeout and the PBX keeps resending them for want of an ACK.
+      ACK them and end the call, keeping the reason on call.sip_reason."""
+    import pyVoIP.VoIP  # noqa: F401  (must load before pyVoIP.SIP: circular import)
+    from pyVoIP import SIP
+    from pyVoIP.VoIP import CallState
+    if getattr(SIP.SIPClient, "_responses_fixed", False):
+        return
+    original = SIP.SIPClient.parse_message
+
+    def parse_message(self, message):
+        if message.type != SIP.SIPMessageType.MESSAGE:
+            method = (message.headers.get("CSeq") or {}).get("method", "")
+            code = int(message.status)
+            if method == "CANCEL":
+                # The PBX's answer to our CANCEL: 200 = it will stop ringing.
+                logger.info(f"SIP: PBX answered our CANCEL with {code} {message.status.phrase} "
+                            f"(call {str(message.headers.get('Call-ID'))[:8]})")
+                if code < 300:
+                    _cancel_confirmed.add(message.headers.get("Call-ID"))
+                return
+            if method == "INVITE" and code >= 300 and code not in (401, 407, 404, 503):
+                call = getattr(self.phone, "calls", {}).get(message.headers.get("Call-ID"))
+                try:
+                    self.out.sendto(self.gen_ack(message).encode("utf8"), (self.server, self.port))
+                except Exception as e:
+                    logger.debug(f"SIP: could not ACK {code}: {e}")
+                logger.info(f"SIP: call {str(message.headers.get('Call-ID'))[:8]} ended by the PBX: "
+                            f"{code} {message.status.phrase}")
+                if call is not None and call.state in (CallState.DIALING, CallState.RINGING):
+                    call.sip_reason = f"{_REJECTED.get(code, message.status.phrase or 'Rejected')} ({code})"
+                    call.state = CallState.ENDED
+                return
+        return original(self, message)
+
+    SIP.SIPClient.parse_message = parse_message
+    SIP.SIPClient._responses_fixed = True
+
+
+_cancel_confirmed: set = set()   # Call-IDs whose CANCEL the PBX answered with 200
+
+
+def cancel_invite(call, on_result: Optional[Callable] = None) -> None:
+    """Stop a call that is still ringing (pyVoIP can only hang up answered
+    calls): send the PBX a CANCEL for our INVITE (RFC 3261 section 9.1:
+    same Request-URI, Via branch, From, To, Call-ID and CSeq number)."""
+    from pyVoIP.VoIP import CallState
+    raw = call.request.raw.decode("utf8", "replace") if isinstance(call.request.raw, bytes) else str(call.request.raw)
+    lines = raw.split("\r\n\r\n")[0].split("\r\n")
+    uri = lines[0].split(" ")[1]
+    keep = {}
+    for line in lines[1:]:
+        name = line.split(":", 1)[0].strip().lower()
+        if name in ("via", "from", "to", "call-id") and name not in keep:
+            keep[name] = line
+        elif name == "cseq" and "cseq" not in keep:
+            keep["cseq"] = f"CSeq: {line.split(':', 1)[1].split()[0]} CANCEL"
+    message = (f"CANCEL {uri} SIP/2.0\r\n{keep['via']}\r\nMax-Forwards: 70\r\n{keep['to']}\r\n{keep['from']}\r\n"
+               f"{keep['call-id']}\r\n{keep['cseq']}\r\nContent-Length: 0\r\n\r\n")
+    sip = call.phone.sip
+    call_id = call.request.headers.get("Call-ID")
+
+    def send():
+        # UDP can lose it: resend (RFC 3261 timer E: 0.5 s, 1 s, 2 s) until
+        # the PBX confirms with 200 OK.
+        for wait in (0.5, 1.0, 2.0, 0):
+            try:
+                sip.out.sendto(message.encode("utf8"), (sip.server, sip.port))
+            except OSError as e:
+                logger.warning(f"SIP: could not send CANCEL: {e}")
+                return
+            time.sleep(wait)
+            if call_id in _cancel_confirmed:
+                _cancel_confirmed.discard(call_id)
+                if on_result:
+                    on_result("confirmed by the PBX (200 OK): the other phone stopped ringing")
+                return
+        logger.warning(f"SIP: the PBX never confirmed our CANCEL for call {str(call_id)[:8]}: "
+                       "the other phone may keep ringing")
+        if on_result:
+            on_result("NOT confirmed by the PBX after 4 tries: the other phone may keep ringing")
+
+    logger.info(f"SIP: cancelling ringing call {str(call_id)[:8]}")
+    threading.Thread(target=send, daemon=True, name="sip-cancel").start()
+    if call.state in (CallState.DIALING, CallState.RINGING):
+        call.sip_reason = "Cancelled"
+        call.state = CallState.ENDED
+
+
+INVITE_TIMEOUT = 8   # seconds to wait for the PBX to take a call request
+
+
+def _fix_pyvoip_bye() -> None:
+    """Note the moment the PBX reports that the other side hung up (BYE)
+    on the call object, so the call's event log shows how fast the agent
+    stopped. Also logs a BYE for a call pyVoIP no longer knows."""
+    import pyVoIP.VoIP as V
+    if getattr(V.VoIPPhone, "_bye_noted", False):
+        return
+    original = V.VoIPPhone._callback_MSG_Bye
+
+    def _callback_MSG_Bye(self, request):
+        call = self.calls.get(request.headers.get("Call-ID"))
+        if call is not None:
+            call.bye_at = time.time()
+        else:
+            logger.info(f"SIP: BYE for an unknown call {str(request.headers.get('Call-ID'))[:8]}")
+        return original(self, request)
+
+    V.VoIPPhone._callback_MSG_Bye = _callback_MSG_Bye
+    V.VoIPPhone._bye_noted = True
+
+
+def _fix_pyvoip_invite_timeout() -> None:
+    """pyVoIP 1.6.8 waits for the PBX's first answer to a call request
+    (100 Trying / 180 Ringing / 401) with a blocking recv and no time limit,
+    holding the SIP lock: when the PBX never answers (rate-limited, busy,
+    packet lost) the call hangs on "dialling" forever, Hang up can't act,
+    and the registration refresh stalls. Give it INVITE_TIMEOUT seconds."""
+    import pyVoIP.VoIP  # noqa: F401  (must load before pyVoIP.SIP: circular import)
+    from pyVoIP import SIP
+    if getattr(SIP.SIPClient, "_invite_timeout_fixed", False):
+        return
+    original = SIP.SIPClient.invite
+
+    def invite(self, number, ms, sendtype):
+        sock = self.s
+        sock.settimeout(INVITE_TIMEOUT)
+        try:
+            return original(self, number, ms, sendtype)
+        except (socket.timeout, TimeoutError):
+            raise SipError(f"The PBX did not respond to the call request within {INVITE_TIMEOUT} seconds. "
+                           "It may be rate-limiting this computer; try again in a minute.")
+        finally:
+            try:
+                sock.settimeout(None)   # back to blocking, as pyVoIP expects
+            except OSError:
+                pass
+
+    SIP.SIPClient.invite = invite
+    SIP.SIPClient._invite_timeout_fixed = True
+
+
 def _fix_pyvoip_invite_retransmit() -> None:
     """An incoming call: when our "200 OK" answer is lost, the PBX resends
     the INVITE. pyVoIP 1.6.8 treats that as a re-negotiation, restarts the
@@ -480,6 +692,9 @@ class SipPhone:
         _fix_pyvoip_requests()
         _fix_pyvoip_audio()
         _fix_pyvoip_invite_retransmit()
+        _fix_pyvoip_responses()
+        _fix_pyvoip_invite_timeout()
+        _fix_pyvoip_bye()
         key = _account(creds)
         with self.lock:
             if self.phone is not None and self.key == key and self.phone._status == PhoneStatus.REGISTERED:
@@ -646,6 +861,23 @@ class SipCallSession(threading.Thread):
     # Run a coroutine of the call store on the main loop and wait for it.
     def _store(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=30)
+
+    def line_quality(self) -> dict:
+        """How much of the caller's audio arrived: missing = holes left by
+        lost packets (filled with silence), late = packets that arrived
+        after a later one. A few % is a normal internet line; above ~5%
+        speech recognition suffers."""
+        try:
+            pm = self.call.RTPClients[0].pmin
+        except Exception:
+            return {}
+        got, gap, late = getattr(pm, "data_bytes", 0), getattr(pm, "gap_bytes", 0), getattr(pm, "late_bytes", 0)
+        total = got + gap
+        if not total:
+            return {"received_seconds": 0}
+        missing = max(0, gap - late)
+        return {"received_seconds": round(got / 8000, 1), "missing_audio_pct": round(missing / total * 100, 1),
+                "late_packets_pct": round(late / total * 100, 1)}
 
     def _answered(self) -> bool:
         from pyVoIP.VoIP import CallState
@@ -875,6 +1107,7 @@ class SipCallSession(threading.Thread):
                 except Exception:
                     pass
             if self.call is not None and self.audit.inbound:
+                self.audit.event("line_quality", **self.line_quality())
                 self.audit.event("call_ended", by="agent" if self.we_hung_up else "other side (BYE from PBX/phone)",
                                  state=str(self.call.state), result=final)
             self.audit.save()

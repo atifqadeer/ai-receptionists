@@ -28,6 +28,7 @@ from loguru import logger
 
 from app.services import telephony
 from app.services.knowledge import KnowledgeBase
+from app.services import company_facts
 
 _CALLS_FILE = Path(__file__).resolve().parents[2] / "data" / "outbound_calls.json"
 _lock = asyncio.Lock()
@@ -78,10 +79,10 @@ _ALIASES = {
     "benefits": ["perks", "benefit"],
     "qualifications": ["required_qualifications", "qualification", "requirements", "required_qualification"],
     "experience": ["required_experience", "experience_required", "years_experience"],
-    "job_type": ["employment_type", "contract_type", "contract", "type"],
-    "working_hours": ["hours", "shift", "shifts", "schedule", "working_pattern"],
-    "start_date": ["start", "available_from"],
-    "job_description": ["description", "duties", "responsibilities", "summary", "job_summary"],
+    "job_type": ["employment_type", "employmenttype", "contract_type", "contracttype", "contract", "type"],
+    "working_hours": ["hours", "workinghours", "shift", "shifts", "schedule", "working_pattern"],
+    "start_date": ["start", "startdate", "available_from", "availablefrom"],
+    "job_description": ["description", "jobdescription", "duties", "responsibilities", "summary", "job_summary"],
 }
 
 _FINAL = {"completed", "no_answer", "busy", "failed", "cancelled"}
@@ -223,6 +224,116 @@ async def add_records(records: list, source: str) -> dict:
     return {"added": len(added), "skipped": skipped, "rejected": rejected, "ids": added}
 
 
+# ---- pulling applicants from the CRM's API ----
+
+_CRM_STATE = Path(__file__).resolve().parents[2] / "data" / "crm_import.json"
+_crm_lock = asyncio.Lock()
+
+
+def _crm_state() -> dict:
+    try:
+        return json.loads(_CRM_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"imported": [], "last": None}
+
+
+def crm_status() -> dict:
+    st = _crm_state()
+    return {"last": st.get("last"), "imported_total": len(st.get("imported", []))}
+
+
+def _crm_items(body) -> list:
+    """The applicants array in a CRM response: a bare list, or the first
+    list under data / applicants / records / items / results / candidates."""
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for key in ("data", "applicants", "records", "items", "results", "candidates"):
+            if isinstance(body.get(key), list):
+                return body[key]
+            if isinstance(body.get(key), dict):   # {"data": {"applicants": [...]}}
+                inner = _crm_items(body[key])
+                if inner:
+                    return inner
+    return []
+
+
+async def pull_from_crm() -> dict:
+    """Fetch applicants from the CRM API and queue a call for each one not
+    imported before (remembered by applicant + job id, or phone + job
+    title, so a finished call is not queued again on the next pull)."""
+    settings = telephony.load_settings()
+    url = (settings.get("crm_api_url") or "").strip()
+    if not url:
+        raise ValueError("Set the CRM API URL first (Agent Setup > Call Voice & CRM).")
+    headers = {"Accept": "application/json"}
+    key = (settings.get("crm_api_key") or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+        headers["X-API-Key"] = key
+    async with _crm_lock:
+        started = _now()
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get(url, headers=headers)
+            if r.status_code >= 400:
+                detail = (r.text or "")[:200]
+                raise ValueError(f"The CRM answered {r.status_code}: {detail}")
+            items = _crm_items(r.json())
+        except httpx.HTTPError as e:
+            raise ValueError(f"Could not reach the CRM at {url}: {e}") from e
+        except json.JSONDecodeError as e:
+            raise ValueError("The CRM did not return JSON.") from e
+
+        st = _crm_state()
+        seen = set(st.get("imported", []))
+        records, keys, already = [], [], 0
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            rec = normalize_record(raw)
+            if not rec.get("applicant_id") and raw.get("id") not in (None, ""):
+                rec["applicant_id"] = str(raw["id"])
+            ident = (f"{rec.get('applicant_id', '')}|{rec.get('job_id', '')}" if rec.get("applicant_id")
+                     else f"{rec.get('phone', '')}|{(rec.get('job_title') or '').lower()}")
+            if ident in seen:
+                already += 1
+                continue
+            records.append(rec)
+            keys.append(ident)
+        result = await add_records(records, source="crm") if records else {"added": 0, "skipped": [], "rejected": [], "ids": []}
+        rejected_rows = {x["row"] for x in result["rejected"]}
+        for i, ident in enumerate(keys, start=1):
+            if i not in rejected_rows:      # rejected ones are retried once the CRM fixes them
+                seen.add(ident)
+        summary = {"at": started, "url": url, "fetched": len(items), "added": result["added"],
+                   "already_imported": already + len(result["skipped"]), "rejected": result["rejected"]}
+        st.update(imported=sorted(seen), last=summary)
+        _CRM_STATE.parent.mkdir(parents=True, exist_ok=True)
+        _CRM_STATE.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info(f"CRM pull: {len(items)} fetched, {result['added']} queued, {summary['already_imported']} already imported, "
+                f"{len(result['rejected'])} rejected")
+    return summary
+
+
+async def _maybe_pull_crm() -> None:
+    """The dialer loop's periodic pull, every crm_poll_minutes."""
+    settings = telephony.load_settings()
+    minutes = int(settings.get("crm_poll_minutes") or 0)
+    if minutes <= 0 or not (settings.get("crm_api_url") or "").strip():
+        return
+    last = (_crm_state().get("last") or {}).get("at")
+    if last and (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() < minutes * 60:
+        return
+    try:
+        await pull_from_crm()
+    except ValueError as e:
+        logger.warning(f"CRM pull failed: {e}")
+        st = _crm_state()
+        st["last"] = {"at": _now(), "url": settings.get("crm_api_url"), "error": str(e)}
+        _CRM_STATE.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 async def delete_call(call_id: str) -> bool:
     async with _lock:
         calls = _load()
@@ -279,6 +390,26 @@ _PATTERNS = [
     ("identity", r"\b(who (is this|are you|is calling)|where are you calling from|what company|are you (a |an )?(robot|bot|real|human|person|machine|computer|ai))\b"),
     ("hold", r"\b(hold on|wait a (second|sec|minute|moment)|one (second|sec|minute|moment)|just a (second|sec|minute|moment)|give me a (second|sec|minute|moment))\b|^\W*wait\W*$"),
     ("how_number", r"\b(how did you get|where did you get) (my|this) (number|details)\b"),
+    *[(name, pat) for name, pat in company_facts.PATTERNS.items()],
+    ("identity", r"\b(who (is this|are you|is calling)|where are you calling from|what company|are you (a |an )?(robot|bot|real|human|person|machine|computer|ai))\b"),
+    ("hold", r"\b(hold on|wait a (second|sec|minute|moment)|one (second|sec|minute|moment)|just a (second|sec|minute|moment)|give me a (second|sec|minute|moment))\b|^\W*wait\W*$"),
+    ("how_number", r"\b(how did you get|where did you get) (my|this) (number|details)\b"),
+    ("company_name", r"\b(name of (your|the|this) (company|agency|organi[sz]ation|firm|business)|(your|the) (company|agency)'?s? name|"
+                     r"what('?s| is) (your|the) (company|agency)( called| name|\W*$)|which (company|agency) (is (this|it)|are you( from)?)|"
+                     r"what (company|agency) (is (this|it)|are you( from)?)|who do you work for|company name)\b"),
+    ("roles", r"\b((what|which) (other |kind of |type of |types of )?(roles|jobs|positions|vacancies|posts|opportunities)|"
+              r"(roles|jobs|positions|vacancies) (are|do|does|did) (you|your company|the company)|"
+              r"(roles|jobs|positions|vacancies|services) (that )?(you|your company|the company) (are |is )?(provid|offer|hir|recruit|ha(ve|s))\w*|"
+              r"what (is|are) the (roles|jobs|positions|vacancies)|"
+              r"(any|other|more) (roles|jobs|positions|vacancies|opportunities)|"
+              r"what (do|does) (you|your company|the company|your agency) (do|recruit|provide|offer|hire)|"
+              r"(recruit|hire|hiring|recruiting) for)\b"),
+    ("company_address", r"\b((your|the|company|office|agency)('?s)? (address|office|head office)|address of (your|the) (company|office|agency)|"
+                        r"where (is|are) (your|the) (office|company|agency|business)|where are you (based|located)|company address)\b"),
+    ("company_contact", r"\b((your|the|company'?s?|office|agency) (phone|telephone|contact|email|e-mail)( number| address| details)?|"
+                        r"how (can|do|could) i (contact|reach|call|email|get (hold|in touch)( of| with)?) (you|the company|your (team|office)))\b"),
+    ("office_hours", r"\b((office|opening|business|working) hours of (the|your) (company|office)|(your|the) (office|opening|business) hours|"
+                     r"when (is|are) (your|the) (office|company) open|when are you open)\b"),
     ("salary", r"\b(salary|pay|paid|wage|rate|money|earn|how much)\b"),
     ("benefits", r"\b(benefit|perk|holiday|pension|bonus)\w*"),
     ("location", r"\b(where|location|located|address|area|city|commute)\b"),
@@ -362,7 +493,13 @@ class CallConversation:
     MAX_TURNS = 30  # questions asked over the agent count as turns too
 
     def __init__(self, call: dict, agent_name: str, company: str, knowledge: Optional[KnowledgeBase] = None,
-                 contact: str = ""):
+                 contact: str = "", profile: Optional[dict] = None, think=None):
+        """profile: the company details from Agent Setup (address, phone,
+        email, business_hours, services). think(question, situation,
+        history) -> str or None: the AI model's own answer, for questions
+        no rule or knowledge passage covers."""
+        self.profile = profile or {}
+        self.think = think
         self.call = call
         self.job = call["job"]
         self.state = call.setdefault("state", {})
@@ -402,6 +539,28 @@ class CallConversation:
             return self._field("employer", "The employer is {}.") or "Our recruiter will share the employer's details with you at the next stage."
         if intent == "identity":
             return f"This is {self.agent_name}, an AI assistant calling from {self.company} about a {_clean(j['job_title'])} position."
+        if intent == "company_name":
+            return f"I'm calling from {self.company}."
+        if intent == "roles":
+            roles = self.knowledge.roles() if self.knowledge else []
+            listed = self.profile.get("services") or ""
+            if roles:
+                listed = ", ".join(roles[:-1]) + " and " + roles[-1] if len(roles) > 1 else roles[0]
+            if listed:
+                return (f"{self.company} recruits for {_clean(listed)}. Right now I'm calling about the "
+                        f"{_clean(j['job_title'])} position.")
+            return f"Today I'm calling about the {_clean(j['job_title'])} position; our recruiter can tell you about our other roles."
+        if intent == "company_address":
+            a = self.profile.get("address")
+            return f"Our office address is {_clean(a)}." if a else "Our recruiter will send you our office address."
+        if intent == "company_contact":
+            phone, email = self.profile.get("phone"), self.profile.get("email")
+            parts = [f"call us on {_clean(phone)}" if phone else "", f"email us at {email.strip()}" if email else ""]
+            parts = [x for x in parts if x]
+            return ("You can " + " or ".join(parts) + ".") if parts else "Our recruiter will give you our contact details."
+        if intent == "office_hours":
+            h = self.profile.get("business_hours")
+            return f"Our office hours are {_clean(h)}." if h else None
         if intent == "how_number":
             return f"Your details are registered with {self.company} as a job applicant, which is why we're calling about this role."
         return None
@@ -432,11 +591,25 @@ class CallConversation:
     def _off_topic(self, text: str) -> bool:
         return bool(_OFF_TOPIC.search(text)) and not (_words(text) & _STRONG_ON_TOPIC)
 
+    def _thought(self, text: str) -> Optional[str]:
+        """The AI model's own answer to a question nothing else answers."""
+        if not self.think:
+            return None
+        j = self.job
+        situation = (f"You are on a phone call with {self.call['applicant'].get('first_name') or 'a job applicant'}, "
+                     f"telling them about a {_clean(j.get('job_title'))} position"
+                     + (f" in {_clean(j['location'])}" if j.get("location") else "")
+                     + ". Job details: " + "; ".join(f"{k.replace('_', ' ')}: {_clean(v)}" for k, v in j.items() if v) + ".")
+        history = []
+        for n in (self.call.get("notes") or [])[-3:]:
+            history += [{"role": "user", "content": n.get("applicant", "")}, {"role": "assistant", "content": n.get("agent", "")}]
+        return self.think(text, situation, history)
+
     def _refuse(self, follow: str) -> str:
         self.state["off_topic"] = self.state.get("off_topic", 0) + 1
         title = _clean(self.job.get("job_title")) or "job"
-        return (f"I'm sorry, I can't answer that. I can only help with questions about this {title} "
-                f"position and {self.company}. {follow}")
+        return (f"That's a bit outside what I can help with on this call, but I'm happy to answer anything about "
+                f"this {title} position or {self.company}. {follow}")
 
     def _reply(self, text: str) -> tuple:
         """(what the agent says, end the call?, note kind)."""
@@ -456,9 +629,10 @@ class CallConversation:
         question = is_question(text)
         # "Where are you calling from" / "where did you get my number" are
         # about the call, not the job's location.
-        for only in ("how_number", "identity"):
+        for only in ("how_number", "company_address", "company_contact", "office_hours", "roles", "company_name", "identity"):
             if only in intents:
                 intents = [only]
+                break
 
         if "do_not_call" in intents:
             self.call["outcome"] = "do_not_call"
@@ -482,8 +656,12 @@ class CallConversation:
         if "hello" in intents and len(intents) == 1:
             return "Yes, I'm here. " + follow, False, "response"
 
-        # Guard rail: nothing outside the job and the company.
+        # Not about the job: the AI model thinks up a short answer itself,
+        # then the call goes back to the job.
         if self._off_topic(text):
+            thought = self._thought(text)
+            if thought:
+                return self._finish(thought + " " + follow, follow, "off_topic")
             return self._finish(self._refuse(follow), follow, "off_topic")
 
         answers = [a for a in (self._job_answer(i) for i in intents) if a]
@@ -505,7 +683,12 @@ class CallConversation:
         kb_answer = self.knowledge.search(text) if self.knowledge else None
         if kb_answer:
             return self._finish(kb_answer + " " + follow, follow, "question")
-        if _words(text) & on_topic_words(self.job, self.company):
+        on_topic = bool(_words(text) & on_topic_words(self.job, self.company))
+        if question or len(_words(text)) > 3:
+            thought = self._thought(text)
+            if thought:
+                return self._finish(thought + " " + follow, follow, "question" if on_topic else "off_topic")
+        if on_topic:
             said = "That's a good question. I'll ask our recruiter to answer that when they contact you. " + follow
             return self._finish(said, follow, "unanswered")
         if question or len(_words(text)) > 3:
@@ -568,6 +751,10 @@ async def dialer_pass() -> None:
 
 async def dialer_loop(stop: asyncio.Event) -> None:
     while not stop.is_set():
+        try:
+            await _maybe_pull_crm()
+        except Exception as e:
+            logger.error(f"CRM pull error: {e}")
         try:
             await dialer_pass()
         except Exception as e:
@@ -632,7 +819,10 @@ async def send_result(call: dict) -> None:
     }
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(url, json=payload)
+            # Authenticate to the CRM with the same key used to fetch applicants.
+            key = (telephony.load_settings().get("crm_api_key") or "").strip()
+            headers = {"Authorization": f"Bearer {key}", "X-API-Key": key} if key else {}
+            r = await client.post(url, json=payload, headers=headers)
         await update_call(call["id"], result_sent=r.status_code < 300)
     except Exception as e:
         logger.warning(f"Could not send call result to CRM: {e}")

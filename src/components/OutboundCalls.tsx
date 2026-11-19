@@ -122,7 +122,7 @@ export default function OutboundCalls() {
             {data.within_calling_hours ? 'Within calling hours: queued applicants are being called.' : 'Outside calling hours: calls wait until the next calling window.'}
           </span>
         )}
-        <span className="text-xs text-gray-500">Change these in Agent Setup › VoIP & Calling.</span>
+        <span className="text-xs text-gray-500">Change these in Settings › Calling.</span>
         <button onClick={() => act(outboundApi.dialAll, 'Calling all queued applicants.')} disabled={!queued || !data.configured}
           className="ml-auto px-4 py-2 rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 text-white text-sm font-medium disabled:opacity-40 flex items-center gap-2">
           <i className="fa-solid fa-phone"></i>Call all queued ({queued})
@@ -148,7 +148,7 @@ export default function OutboundCalls() {
               <code className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 break-all">{webhookUrl}</code>
               <button onClick={() => copy(webhookUrl)} className="px-3 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800" title="Copy"><i className="fa-regular fa-copy"></i></button>
             </div>
-            {!publicUrl && <p className="text-xs text-amber-300 mt-1">This is a local address. A cloud CRM needs the public URL from Agent Setup › VoIP & Calling.</p>}
+            {!publicUrl && <p className="text-xs text-amber-300 mt-1">This is a local address. A cloud CRM needs the public URL from Settings › Calling.</p>}
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-400 mb-1">Token (send as header <code>X-Webhook-Token</code>, or <code>?token=</code>)</label>

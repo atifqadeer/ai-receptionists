@@ -89,7 +89,7 @@ export default function InboundSettings({ value, onChange, sipServer }: {
         </div>
         <div className="md:col-span-2">
           <label className={label}>Greeting (optional)</label>
-          <input type="text" value={value.greeting} placeholder="Blank: the agent's greeting from Agent Setup"
+          <input type="text" value={value.greeting} placeholder="Blank: the agent's greeting from Settings › Agent"
             onChange={(e) => set({ greeting: e.target.value })} className={input} />
         </div>
         <div>

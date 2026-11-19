@@ -8,3 +8,6 @@ build/
 venv/
 .venv/
 .env
+
+# Mock CRM runtime data (recreated from samples)
+mock-crm/data/

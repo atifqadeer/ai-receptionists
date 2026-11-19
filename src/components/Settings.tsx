@@ -3,8 +3,11 @@ import ApiKeysGuide from './ApiKeysGuide';
 import Integrations from './Integrations';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
-export default function Settings() {
-  const [activeSection, setActiveSection] = useState('integrations');
+// `section` is set when shown inside the unified Settings page, which
+// draws its own tabs; the built-in section list is then hidden.
+export default function Settings({ section }: { section?: string } = {}) {
+  const [ownSection, setActiveSection] = useState('integrations');
+  const activeSection = section ?? ownSection;
   const [saved, setSaved] = useState(false);
 
   // Use localStorage hook for persistence
@@ -127,6 +130,7 @@ export default function Settings() {
 
       <div className="flex flex-col lg:flex-row gap-6">
         {/* Section Nav */}
+        {!section && (
         <div className="lg:w-56 flex lg:flex-col gap-2 overflow-x-auto pb-2 lg:pb-0">
           {sections.map((section) => (
             <button
@@ -143,6 +147,7 @@ export default function Settings() {
             </button>
           ))}
         </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 space-y-6">
@@ -230,7 +235,7 @@ export default function Settings() {
               <div className="bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm px-4 py-3 rounded-lg">
                 <i className="fa-solid fa-triangle-exclamation mr-2"></i>
                 This page is an overview of providers only: details entered here are <strong>not used for calls</strong>.
-                Set up the VoIP provider or SIP account the agent calls with in <strong>Agent Setup › VoIP & Calling</strong>.
+                Set up the VoIP provider or SIP account the agent calls with in <strong>Settings › Calling › SIP / VoIP Account</strong>.
               </div>
               {/* Provider Selection Header */}
               <div className="bg-gradient-to-r from-emerald-600/10 to-teal-600/10 rounded-xl border border-emerald-500/20 p-5">

@@ -374,7 +374,7 @@ export default function CallSimulator() {
                 Greeting Message
               </h3>
               <p className="text-xs text-gray-400 mt-1">
-                This is what the AI agent says when a call starts. Edit it here or in <strong>Agent Setup → Behavior & Scripts</strong>.
+                This is what the AI agent says when a call starts. Edit it here or in <strong>Settings › Agent › Behavior & Scripts</strong>.
               </p>
             </div>
             {!editingGreeting && (
@@ -403,7 +403,7 @@ export default function CallSimulator() {
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-500">
                   <i className="fa-solid fa-info-circle mr-1"></i>
-                  Changes will be saved to Agent Setup automatically
+                  Changes will be saved to Settings › Agent automatically
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -430,7 +430,7 @@ export default function CallSimulator() {
                 <div className="mt-3 p-2 rounded bg-emerald-500/10 border border-emerald-500/30">
                   <p className="text-xs text-emerald-300 flex items-center gap-1">
                     <i className="fa-solid fa-check-circle"></i>
-                    Greeting saved! This will sync with Agent Setup.
+                    Greeting saved! This will sync with Settings › Agent.
                   </p>
                 </div>
               )}
@@ -446,7 +446,7 @@ export default function CallSimulator() {
             <p className="text-sm text-gray-300 italic">{behavior.farewell}</p>
             <p className="text-xs text-gray-500 mt-2">
               <i className="fa-solid fa-info-circle mr-1"></i>
-              Edit in <strong>Agent Setup → Behavior & Scripts</strong>
+              Edit in <strong>Settings › Agent › Behavior & Scripts</strong>
             </p>
           </div>
         </div>
@@ -465,7 +465,7 @@ export default function CallSimulator() {
           <p className="text-sm text-blue-300 flex items-start gap-2">
             <i className="fa-solid fa-circle-info mt-0.5"></i>
             <span>
-              <strong>Tip:</strong> The greeting and farewell messages are shared with <strong>Agent Setup</strong>. 
+              <strong>Tip:</strong> The greeting and farewell messages are shared with <strong>Settings › Agent</strong>. 
               Any changes you make here will also update the agent's configuration. 
               For a real voice call experience, try the <strong>Make a Call</strong> feature instead.
             </span>

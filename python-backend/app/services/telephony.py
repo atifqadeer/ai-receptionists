@@ -98,6 +98,11 @@ DEFAULT_SETTINGS = {
     "language": "en-GB",
     "voice": "",
     "result_webhook_url": "",       # outcome of each call is POSTed here (your CRM)
+    # Pull applicants from your CRM's API (GET, JSON array) and queue a call
+    # for each new one; see outbound.pull_from_crm.
+    "crm_api_url": "",              # e.g. http://127.0.0.1:8100/api/v1/applicants?status=new
+    "crm_api_key": "",              # sent as "Authorization: Bearer ..." and "X-API-Key"
+    "crm_poll_minutes": 0,          # 0 = only when "Fetch now" is pressed
     "sip_domain": "",               # PBX domain for extensions: 1234 -> sip:1234@sip_domain
     "webhook_token": "",            # required on incoming CRM webhooks
     # Incoming calls: the agent registers this extension on the PBX and
@@ -160,6 +165,8 @@ def public_settings(settings: dict) -> dict:
         for f in PROVIDERS.get(pid, {}).get("fields", []):
             if f.get("secret") and creds.get(f["key"]):
                 creds[f["key"]] = _mask(creds[f["key"]])
+    if out.get("crm_api_key"):
+        out["crm_api_key"] = _mask(out["crm_api_key"])
     inbound = inbound_settings(out)
     if inbound.get("password"):
         inbound["password"] = _mask(inbound["password"])
@@ -177,7 +184,9 @@ def update_settings(changes: dict) -> dict:
     inbound_in = changes.pop("inbound", None)
     for key in DEFAULT_SETTINGS:
         if key in changes and key not in ("credentials", "webhook_token", "inbound"):
-            settings[key] = changes[key]
+            if key == "crm_api_key" and str(changes[key] or "").startswith("•"):
+                continue  # unchanged masked value
+            settings[key] = changes[key].strip() if isinstance(changes[key], str) else changes[key]
     if isinstance(inbound_in, dict):
         inbound = inbound_settings(settings)
         for key in DEFAULT_INBOUND:

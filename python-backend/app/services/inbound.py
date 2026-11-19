@@ -33,7 +33,8 @@ from typing import Optional
 from loguru import logger
 
 from app.services import telephony
-from app.services.sip_dialer import AUDIT_DIR, SipCallSession, SipError, SipPhone, _account, sip_phone, whisper_model
+from app.services.sip_dialer import (AUDIT_DIR, RING_TIMEOUT, SipCallSession, SipError, SipPhone, _account,
+                                      cancel_invite, dial_target, sip_phone, whisper_model)
 
 _CALLS_FILE = Path(__file__).resolve().parents[2] / "data" / "inbound_calls.json"
 KEEP_CALLS = 1000           # newest inbound calls kept in the log (recordings: sip_dialer.AUDIT_KEEP)
@@ -66,14 +67,16 @@ def _save(calls: list) -> None:
     _CALLS_FILE.write_text(json.dumps(calls[-KEEP_CALLS:], indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def list_calls() -> list:
+def list_calls(direction: str = "inbound") -> list:
+    """Newest first. direction: "inbound" (answered on the extension) or
+    "outbound" (dialled from the Make a Call dial pad)."""
     with _store_lock:
-        return list(reversed(_load()))
+        return [c for c in reversed(_load()) if c.get("direction", "inbound") == direction]
 
 
-def clear_calls() -> None:
+def clear_calls(direction: str = "inbound") -> None:
     with _store_lock:
-        _save([])
+        _save([c for c in _load() if c.get("direction", "inbound") != direction])
 
 
 def get_call(call_id: str) -> Optional[dict]:
@@ -159,6 +162,23 @@ def _update_call(call_id: str, **changes) -> None:
         _save(calls)
 
 
+def close_interrupted_calls() -> None:
+    """At startup: calls still marked live were cut off when the backend
+    stopped (restart, reload, crash). Mark them failed instead of leaving
+    them "dialing" or "in progress" for ever."""
+    with _store_lock:
+        calls = _load()
+        changed = 0
+        for c in calls:
+            if c.get("status") in ("dialing", "ringing", "in_progress"):
+                c.update(status="failed", ended_at=c.get("ended_at") or _now(),
+                         error="The backend stopped or restarted during this call.")
+                changed += 1
+        if changed:
+            _save(calls)
+            logger.info(f"Calls: marked {changed} call(s) interrupted by a backend restart as failed")
+
+
 # ---- the inbound line ----
 
 def line_credentials(settings: dict) -> dict:
@@ -190,6 +210,7 @@ class InboundLine:
 
     def start(self, agent, loop: asyncio.AbstractEventLoop) -> None:
         self.agent, self.loop = agent, loop
+        close_interrupted_calls()
         if self._thread is None:
             self._thread = threading.Thread(target=self._watchdog, daemon=True, name="inbound-line")
             self._thread.start()
@@ -231,9 +252,12 @@ class InboundLine:
 
     def _watchdog(self) -> None:
         last_key = None
+        fails = 0   # registrations refused in a row: retry less often each time
         while not self._stop.is_set():
             poked = self._poke.is_set()
             self._poke.clear()
+            if poked:
+                fails = 0
             try:
                 settings = telephony.load_settings()
                 inbound = telephony.inbound_settings(settings)
@@ -254,7 +278,8 @@ class InboundLine:
                                                  f"{server}:{port}. Calls to it are answered by the agent; "
                                                  "it also places the outbound job calls."}
                     except SipError as e:
-                        self.state = {"state": "error", "message": f"{e} Retrying every {WATCHDOG_SECONDS} seconds."}
+                        self.state = {"state": "error", "message": f"{e} Retrying in {self._retry_wait(fails + 1)} seconds."}
+                        fails += 1
                         logger.warning(f"Inbound: {e}")
                 elif not inbound.get("enabled"):
                     if self.phone.phone is not None:
@@ -276,13 +301,23 @@ class InboundLine:
                                       "message": f"Extension {creds['username']} is registered on "
                                                  f"{key[0]}:{key[1]}. Calls to it are answered by the agent."}
                     except SipError as e:
-                        self.state = {"state": "error", "message": f"{e} Retrying every {WATCHDOG_SECONDS} seconds."}
+                        self.state = {"state": "error", "message": f"{e} Retrying in {self._retry_wait(fails + 1)} seconds."}
+                        fails += 1
                         logger.warning(f"Inbound: {e}")
                 last_key = key
             except Exception as e:
                 self.state = {"state": "error", "message": f"Inbound line error: {e}"}
                 logger.warning(f"Inbound line error: {e}")
-            self._poke.wait(WATCHDOG_SECONDS)
+            if self.state.get("state") != "error":
+                fails = 0
+            self._poke.wait(self._retry_wait(fails))
+
+    @staticmethod
+    def _retry_wait(fails: int) -> int:
+        """Seconds until the next check. A PBX that refuses registrations is
+        often rate-limiting us (FreePBX Responsive Firewall, fail2ban):
+        retrying every 30 s keeps the block alive, so back off to 5 min."""
+        return WATCHDOG_SECONDS if fails <= 1 else min(300, WATCHDOG_SECONDS * 2 ** (fails - 1))
 
     @staticmethod
     def _clashes_with_outbound(settings: dict, creds: dict) -> bool:
@@ -320,37 +355,64 @@ class InboundCallSession(SipCallSession):
 
     AUDIT_FIRST_EVENT = "incoming"
 
-    def __init__(self, settings: dict, call, loop: asyncio.AbstractEventLoop, agent):
-        caller = call.request.headers.get("From") or {}
-        self.caller_number = caller.get("number") or caller.get("address") or "unknown"
-        # pyVoIP leaves a quote on display names: '"Atif Developer" <sip:..>' -> 'Atif Developer"'
-        self.caller_name = (caller.get("caller") or "").strip().strip("\"'").strip()
+    DIRECTION = "inbound"
+    hangup_requested = False
+
+    def __init__(self, settings: dict, call, loop: asyncio.AbstractEventLoop, agent,
+                 number: str = "", name: str = ""):
+        if call is not None:
+            caller = call.request.headers.get("From") or {}
+            number = caller.get("number") or caller.get("address") or "unknown"
+            # pyVoIP leaves a quote on display names: '"Atif Developer" <sip:..>' -> 'Atif Developer"'
+            name = caller.get("caller") or ""
+        self.caller_number = number
+        self.caller_name = (name or "").strip().strip("\"'").strip()
         super().__init__(settings, self.caller_number, uuid.uuid4().hex, loop, make_conversation=None)
         self.call = call
         self.agent = agent
         self.inbound = telephony.inbound_settings(settings)
-        self.conv_id = f"inbound-{self.call_id[:12]}"
+        self.conv_id = f"{'dialed' if self.DIRECTION == 'outbound' else 'inbound'}-{self.call_id[:12]}"
+
+    def _greeting(self, cfg) -> str:
+        return (self.inbound.get("greeting") or cfg.greeting or "Hello, how can I help you?").strip()
+
+    def _farewell(self, cfg) -> str:
+        return (cfg.farewell or "Thank you for calling. Goodbye.").strip()
+
+    def _adapt(self, reply: str) -> str:
+        """Hook: reword a reply for this kind of call (inbound: as is)."""
+        return reply
 
     def _ask(self, text: str) -> str:
         """The agent's reply to the caller (run on the main event loop)."""
         future = asyncio.run_coroutine_threadsafe(self.agent.process_message(self.conv_id, text), self.loop)
         return (future.result(timeout=60).message or "").strip()
 
+    def _connect(self) -> bool:
+        """Inbound: answer the ringing call. Returns True once connected."""
+        self.call.answer()
+        return True
+
     def run(self) -> None:
         cfg = self.agent.get_config()
-        greeting = (self.inbound.get("greeting") or cfg.greeting or "Hello, how can I help you?").strip()
-        farewell = (cfg.farewell or "Thank you for calling. Goodbye.").strip()
+        greeting = self._greeting(cfg)
+        farewell = self._farewell(cfg)
         transcript: list = []
-        record = {"id": self.call_id, "caller_number": self.caller_number, "caller_name": self.caller_name,
-                  "extension": self.inbound.get("extension"), "status": "ringing", "started_at": _now(),
+        outgoing = self.DIRECTION == "outbound"
+        record = {"id": self.call_id, "direction": self.DIRECTION, "caller_number": self.caller_number,
+                  "caller_name": self.caller_name, "extension": self.inbound.get("extension"),
+                  "status": "dialing" if outgoing else "ringing", "started_at": _now(),
                   "answered_at": None, "ended_at": None, "transcript": transcript, "error": None,
                   "audit_dir": self.audit.dir.name}
         _add_call(record)
-        logger.info(f"Inbound: call from {self.caller_number} {self.caller_name!r}")
+        _live[self.call_id] = self
+        logger.info(f"{self.DIRECTION.title()}: call {'to' if outgoing else 'from'} {self.caller_number} {self.caller_name!r}")
         final = "failed"
         try:
             whisper_model()
-            self.call.answer()
+            if not self._connect():
+                final = "no_answer"
+                return
             self.audit.answered()
             self.clock = time.time()
             _update_call(self.call_id, status="in_progress", answered_at=_now())
@@ -364,6 +426,8 @@ class InboundCallSession(SipCallSession):
             deadline = time.time() + 60 * max(1, int(self.inbound.get("max_minutes") or 15))
 
             def turn(text: str, end: bool = False):
+                if not self._answered():
+                    return None
                 transcript.append({"role": "agent", "text": text})
                 _update_call(self.call_id, transcript=transcript)
                 barge = self.say(text, interruptible=not end)
@@ -373,10 +437,10 @@ class InboundCallSession(SipCallSession):
 
             barge = turn(greeting)
             silent, unclear = 0, 0
-            while self._answered():
+            while self._answered() and not self.hangup_requested:
                 heard = self.listen(barge)
                 barge = None
-                if not self._answered():
+                if not self._answered() or self.hangup_requested:
                     break
                 if not heard:
                     silent += 1
@@ -400,17 +464,24 @@ class InboundCallSession(SipCallSession):
                 if time.time() > deadline:
                     turn("I'm afraid we've reached the time limit for this call. " + farewell, end=True)
                     break
+                if not self._answered() or self.hangup_requested:
+                    break
                 reply = self._ask(heard) or "Sorry, could you say that again?"
-                end = reply.lower() == farewell.lower()
+                if not self._answered() or self.hangup_requested:
+                    break
+                end = reply.lower() == (cfg.farewell or "").strip().lower() or reply.lower() == farewell.lower() \
+                    or bool(re.search(r"\b(goodbye|have a (wonderful|great|nice|good) day)\W*$", reply, re.I))
+                reply = self._adapt(reply)
                 barge = turn(reply, end=end)
                 if end:
                     break
             final = "completed"
         except Exception as e:
-            logger.warning(f"Inbound call {self.call_id[:8]} failed: {e}")
+            logger.warning(f"{self.DIRECTION.title()} call {self.call_id[:8]} failed: {e}")
             self.audit.event("error", error=str(e))
             _update_call(self.call_id, error=str(e))
         finally:
+            _live.pop(self.call_id, None)
             if self._answered():
                 try:
                     time.sleep(0.5)
@@ -418,6 +489,19 @@ class InboundCallSession(SipCallSession):
                     self.call.hangup()
                 except Exception:
                     pass
+            if self.hangup_requested:
+                self.we_hung_up = True
+                if final == "no_answer":
+                    final = "cancelled"
+            if self.call is not None and self.audit.inbound:
+                quality = self.line_quality()
+                self.audit.event("line_quality", **quality)
+                if quality.get("missing_audio_pct", 0) > 5:
+                    logger.warning(f"Call {self.call_id[:8]}: poor line, {quality['missing_audio_pct']}% of the "
+                                   "caller's audio was lost on the way (network packet loss)")
+            bye_at = getattr(self.call, "bye_at", None)
+            if bye_at:
+                self.audit.event("bye_received", stopped_after_seconds=round(time.time() - bye_at, 2))
             self.audit.event("call_ended", by="agent" if self.we_hung_up else "caller", result=final)
             self.audit.save()
             try:
@@ -426,7 +510,120 @@ class InboundCallSession(SipCallSession):
                 pass
             _update_call(self.call_id, status=final, ended_at=_now(), transcript=transcript,
                          ended_by="agent" if self.we_hung_up else "caller")
-            logger.info(f"Inbound: call from {self.caller_number} ended ({final})")
+            logger.info(f"{self.DIRECTION.title()}: call with {self.caller_number} ended ({final})")
+
+    def request_hangup(self) -> None:
+        """The dashboard's Hang up button: stop ringing or end the conversation."""
+        from pyVoIP.VoIP import CallState
+        self.hangup_requested = True
+        call = self.call
+        if call is None:
+            self.audit.event("hangup_pressed", while_state="placing the call")
+            return
+        try:
+            if call.state == CallState.ANSWERED:
+                self.audit.event("hangup_pressed", while_state="connected")
+                call.hangup()                 # BYE
+            elif call.state in (CallState.DIALING, CallState.RINGING):
+                if self.DIRECTION == "outbound":
+                    self.audit.event("hangup_pressed", while_state=str(call.state))
+                    cancel_invite(call, on_result=lambda r: self.audit.event("cancel_result", result=r))
+                else:
+                    call.deny()
+        except Exception as e:
+            logger.warning(f"Call {self.call_id[:8]}: hang up failed: {e}")
+            self.audit.event("hangup_failed", error=str(e), state=str(call.state))
+
+
+class DialedCallSession(InboundCallSession):
+    """The Make a Call dial pad: the agent phones a number over the SIP
+    Account and holds the same receptionist conversation as an inbound call."""
+
+    DIRECTION = "outbound"
+    AUDIT_FIRST_EVENT = "dialing"
+
+    def __init__(self, settings: dict, number: str, name: str, loop: asyncio.AbstractEventLoop, agent,
+                 opening: str = ""):
+        super().__init__(settings, None, loop, agent, number=number, name=name)
+        self.dial = dial_target(number, settings)
+        self.opening = (opening or "").strip()
+
+    def _greeting(self, cfg) -> str:
+        """We are phoning them: say who is calling and why, then ask a
+        question they can answer (not "how can I help you?")."""
+        first = (self.caller_name.split() or [""])[0]
+        text = self.opening or DEFAULT_DIAL_OPENING
+        out = (text.replace("{name}", first).replace("{agent}", cfg.agent_name or "the assistant")
+                   .replace("{company}", cfg.company_name or "our company"))
+        # "Hello , this is" when no name was entered
+        return re.sub(r"\s+([,.!?])", r"\1", re.sub(r"\s{2,}", " ", out)).strip()
+
+    def _farewell(self, cfg) -> str:
+        return f"Thank you for your time. Have a great day. Goodbye."
+
+    def _adapt(self, reply: str) -> str:
+        # The receptionist's lines are written for people who rang us.
+        reply = re.sub(r"\b(thank you|thanks) (so much )?for calling( [A-Z][\w&' ]*?)?([.!,])", r"Thank you for your time\4", reply, flags=re.I)
+        return re.sub(r"\bfor calling\b", "for your time", reply, flags=re.I)
+
+    def _connect(self) -> bool:
+        from pyVoIP.VoIP import CallState
+        phone = sip_phone.ensure(self.settings["credentials"]["sip"])
+        self.call = phone.call(self.dial)
+        _update_call(self.call_id, status="ringing")
+        self.audit.event("ringing", dial=self.dial)
+        deadline = time.time() + RING_TIMEOUT
+        while self.call.state == CallState.DIALING and time.time() < deadline and not self.hangup_requested:
+            time.sleep(0.2)
+        if self.call.state == CallState.DIALING:
+            # Nobody answered in time: stop it ringing at the other end.
+            try:
+                cancel_invite(self.call, on_result=lambda r: self.audit.event("cancel_result", result=r))
+            except Exception as e:
+                logger.warning(f"Dial {self.call_id[:8]}: could not cancel the ringing call: {e}")
+            if not self.hangup_requested:
+                self.call.sip_reason = "No answer"
+        if self.call.state == CallState.ANSWERED and self.hangup_requested:
+            # Answered just as Hang up was pressed: end it straight away.
+            try:
+                self.call.hangup()
+            except Exception:
+                pass
+        if self.call.state != CallState.ANSWERED or self.hangup_requested:
+            reason = getattr(self.call, "sip_reason", "") or ""
+            self.audit.event("not_answered", state=str(self.call.state), reason=reason)
+            if reason and reason != "Cancelled":
+                _update_call(self.call_id, reason=reason)
+            return False
+        return True
+
+
+_live: dict = {}   # call id -> session, while the call is going on
+
+
+DEFAULT_DIAL_OPENING = ("Hello {name}, this is {agent} calling from {company}. I'm an AI assistant, and I'm "
+                        "calling about job opportunities with us. Are you currently looking for a new role?")
+
+
+def dial(number: str, name: str, agent, loop: asyncio.AbstractEventLoop, opening: str = "") -> str:
+    """Place a call from the dial pad in the background; returns its id."""
+    settings = telephony.load_settings()
+    if settings.get("provider") != "sip":
+        raise SipError("The dial pad calls through the SIP / VoIP Account: choose SIP as the provider in Agent Setup.")
+    missing = telephony.missing_settings(settings)
+    if missing:
+        raise SipError("The SIP Account is not set up yet: missing " + ", ".join(missing))
+    session = DialedCallSession(settings, number, name, loop, agent, opening=opening)
+    threading.Thread(target=session.run, daemon=True, name=f"dial-{session.call_id[:8]}").start()
+    return session.call_id
+
+
+def hangup(call_id: str) -> bool:
+    session = _live.get(call_id)
+    if not session:
+        return False
+    session.request_hangup()
+    return True
 
 
 inbound_line = InboundLine()

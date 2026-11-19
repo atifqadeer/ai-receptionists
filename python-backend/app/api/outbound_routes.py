@@ -6,8 +6,10 @@ Routes for VoIP settings, outbound job calls and the provider voice webhooks.
   /webhooks/voice/...  called by the VoIP provider during a call
 """
 
+import asyncio
 import hmac
 import json
+import re
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -83,6 +85,45 @@ async def delete_inbound_call(call_id: str):
     return {"ok": True}
 
 
+# ---- dial pad (Make a Call): the agent phones a number over the SIP Account ----
+
+@telephony_router.get("/dialed")
+async def dialed_calls():
+    return {"calls": inbound.list_calls("outbound")[:50]}
+
+
+@telephony_router.get("/dial/opening")
+async def default_dial_opening():
+    """The opening the agent says on dial-pad calls when none is given."""
+    return {"opening": inbound.DEFAULT_DIAL_OPENING}
+
+
+@telephony_router.post("/dial")
+async def dial_number(request: Request, data: dict):
+    number = re.sub(r"[^\d+*#]", "", str(data.get("number") or ""))
+    if not re.fullmatch(r"\+?[\d*#]{2,20}", number):
+        raise HTTPException(status_code=400, detail="Enter a phone number or extension to call.")
+    try:
+        call_id = inbound.dial(number, str(data.get("name") or "")[:80], request.app.state.ai_agent,
+                               asyncio.get_running_loop(), opening=str(data.get("opening") or "")[:600])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": call_id}
+
+
+@telephony_router.post("/dialed/{call_id}/hangup")
+async def hangup_dialed(call_id: str):
+    if not inbound.hangup(call_id):
+        raise HTTPException(status_code=404, detail="That call is not in progress")
+    return {"ok": True}
+
+
+@telephony_router.delete("/dialed")
+async def clear_dialed_calls():
+    inbound.clear_calls("outbound")
+    return {"ok": True}
+
+
 @telephony_router.post("/test")
 async def test_telephony():
     return await telephony.test_connection(telephony.load_settings())
@@ -141,6 +182,20 @@ async def crm_webhook(request: Request, token: Optional[str] = None):
         raise HTTPException(status_code=400, detail="Expected a JSON object or list")
     records = [outbound.normalize_record(r) for r in items if isinstance(r, dict)]
     return await outbound.add_records(records, source="webhook")
+
+
+@outbound_router.post("/crm/pull")
+async def crm_pull():
+    """Fetch applicants from the CRM API now and queue the new ones."""
+    try:
+        return await outbound.pull_from_crm()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@outbound_router.get("/crm/status")
+async def crm_status():
+    return outbound.crm_status()
 
 
 @outbound_router.post("/upload-csv")
@@ -206,7 +261,8 @@ def make_conversation(agent, call: dict) -> outbound.CallConversation:
     cfg = agent.get_config()
     sources = agent._knowledge_sources()
     kb = KnowledgeBase(sources, cfg.company_name) if sources else None
-    return outbound.CallConversation(call, cfg.agent_name, cfg.company_name, kb)
+    return outbound.CallConversation(call, cfg.agent_name, cfg.company_name, kb,
+                                     profile=dict(cfg.knowledge_base or {}), think=agent.think)
 
 
 def _conversation(request: Request, call: dict) -> outbound.CallConversation:
@@ -231,7 +287,7 @@ async def preview_call(request: Request, call_id: str, data: Optional[dict] = No
         return {"reply": conv.opening(), "ended": False, "outcome": None}
     sim = _previews[call_id]
     conv = _conversation(request, sim)
-    reply, ended = conv.reply(data.get("message", ""))
+    reply, ended = await asyncio.to_thread(conv.reply, data.get("message", ""))
     return {"reply": reply, "ended": ended, "outcome": sim.get("outcome")}
 
 
@@ -298,7 +354,7 @@ async def voice_gather(request: Request, cid: str):
     if heard:
         call["transcript"] = call.get("transcript", []) + [{"role": "applicant", "text": heard}]
     conv = _conversation(request, call)
-    reply, end = conv.reply(heard)
+    reply, end = await asyncio.to_thread(conv.reply, heard)
     logger.info(f"Outbound {cid}: applicant said {heard!r} -> outcome {call.get('outcome')}")
     return await _say(request, call, reply, end)
 
@@ -310,7 +366,7 @@ async def voice_noinput(request: Request, cid: str):
     if not call:
         return _voice_response(*telephony.say_and_hangup(s, "Goodbye."))
     conv = _conversation(request, call)
-    reply, end = conv.reply("")
+    reply, end = await asyncio.to_thread(conv.reply, "")
     return await _say(request, call, reply, end)
 
 

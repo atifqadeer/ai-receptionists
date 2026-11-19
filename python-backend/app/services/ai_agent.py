@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import AsyncGenerator, Optional
 from datetime import datetime
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from app.core.config import settings
 from app.models.schemas import (
     AgentConfig, CallContext, Message, AgentResponse
 )
 from app.services.knowledge import KnowledgeBase, key_words
+from app.services import company_facts
 from app.services.conversation import CallState, Conversation
 
 # The agent's configuration (identity + knowledge base + FAQs) is the
@@ -134,7 +135,8 @@ KNOWLEDGE DOCUMENTS (uploaded files; answer from them exactly as from the compan
 RULES:
 1. Always greet the caller warmly
 2. Listen carefully and identify the caller's intent
-3. KNOWLEDGE BASE ONLY: answer questions using ONLY the BUSINESS INFORMATION, FAQs, COMPANY KNOWLEDGE and KNOWLEDGE DOCUMENTS above. If the answer is not in that data, say you don't have that information and offer to connect the caller with the team — never invent hours, prices, addresses, policies or services.
+3. COMPANY FACTS FROM THE KNOWLEDGE ONLY: anything about the company (its name, roles, hours, prices, addresses, policies, services) comes ONLY from the BUSINESS INFORMATION, FAQs, COMPANY KNOWLEDGE and KNOWLEDGE DOCUMENTS above. If a company fact is not there, say you don't have that information and offer to connect the caller with the team — never invent it.
+3b. OTHER QUESTIONS: a general question that is not about the company (general knowledge, a word's meaning, a simple calculation, small talk) — think it through and answer it briefly and helpfully from your own knowledge in one or two sentences, then offer to help with anything about the company. Only decline what is harmful or inappropriate.
 4. If you can't help, offer to transfer to a human agent
 5. Keep responses concise and conversational (suitable for voice)
 6. Never make up information you don't have
@@ -192,10 +194,14 @@ AVAILABLE INTENTS:
         # answers far more reliably than keyword matching. Without a
         # model, the keyword lookup answers from the same knowledge.
         llm_ready = self._llm_available()
-        if llm_ready:
-            kb_hit = self._faq_lookup(self._significant_words(user_message))
-        else:
-            kb_hit = self._converse(call_id, user_message)
+        # Company name, address, contact details, hours, roles: straight
+        # from Agent Setup, before any search or AI model.
+        kb_hit = self._company_fact(call_id, user_message)
+        if kb_hit is None:
+            if llm_ready:
+                kb_hit = self._faq_lookup(self._significant_words(user_message))
+            else:
+                kb_hit = self._converse(call_id, user_message)
         if kb_hit is not None:
             answer, intent = kb_hit
             self.conversation_history[call_id].append({
@@ -257,6 +263,68 @@ AVAILABLE INTENTS:
                 action_data={"action": "transfer_to_human"}
             )
     
+    def think(self, question: str, situation: str, history: Optional[list] = None) -> Optional[str]:
+        """A short spoken answer the AI model thinks up itself, for a
+        question no rule or knowledge-base passage answers (used by the
+        job calls). Company facts only from the knowledge; general
+        questions from the model's own knowledge. None without a working
+        AI model, or when the model can't be reached in time (the call
+        carries on with its own fallback). Synchronous: runs in the call's
+        own thread."""
+        if not self._llm_available():
+            return None
+        cfg = self.config
+        kb = cfg.knowledge_base or {}
+        facts = "\n".join(f"- {k.replace('_', ' ').title()}: {kb[k]}" for k in
+                          ("address", "phone", "email", "business_hours", "services") if kb.get(k))
+        docs = "\n\n".join(f"--- {name} ---\n{text}" for name, text in self._knowledge_sources())[:12000]
+        system = (
+            f"You are {cfg.agent_name}, an AI assistant phoning on behalf of {cfg.company_name}. {situation}\n\n"
+            f"COMPANY DETAILS:\n- Company name: {cfg.company_name}\n{facts}\n\n"
+            f"COMPANY KNOWLEDGE:\n{docs or 'None.'}\n\n"
+            "HOW TO ANSWER (this is a live phone call, your words are spoken aloud):\n"
+            "- Think about what the person actually asked and answer that, in one or two short, natural sentences.\n"
+            "- Facts about the company (name, roles, address, contact details, process, pay, policies) come ONLY "
+            "from COMPANY DETAILS and COMPANY KNOWLEDGE. If a company fact isn't there, say the recruiter will confirm it.\n"
+            "- Any other question (general knowledge, a word's meaning, a simple sum, small talk): answer it briefly "
+            "and helpfully from your own knowledge.\n"
+            "- Decline only what is harmful, offensive or inappropriate, politely.\n"
+            "- No lists, no markdown, no emojis. Do NOT end with a question: the call adds its own follow-up."
+        )
+        messages = [{"role": "system", "content": system}]
+        for turn in (history or [])[-6:]:
+            messages.append(turn)
+        messages.append({"role": "user", "content": question})
+        try:
+            if not hasattr(self, "_sync_client"):
+                self._sync_client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=8.0, max_retries=0)
+            response = self._sync_client.chat.completions.create(
+                model=settings.OPENAI_MODEL, messages=messages, temperature=0.4, max_tokens=120)
+            answer = re.sub(r"\s+", " ", (response.choices[0].message.content or "")).strip()
+            return answer or None
+        except Exception as e:
+            logger.warning(f"AI model could not answer {question!r}: {e}")
+            return None
+
+    def _company_fact(self, call_id: str, message: str) -> Optional[tuple]:
+        """(answer, intent) for a question about the company itself, else
+        None. Calls the agent places itself (dial pad) have call ids that
+        start with "dialed-": there the agent is the one calling."""
+        intent = company_facts.detect(message)
+        if not intent:
+            return None
+        roles = KnowledgeBase(self._knowledge_sources(), self.config.company_name).roles() if intent == "roles" else None
+        text = company_facts.answer(intent, self.config.company_name, self.config.knowledge_base or {}, roles,
+                                    calling=call_id.startswith("dialed-"))
+        if not text:
+            return None
+        state = self.call_state.get(call_id)
+        if state is not None and state.asking:
+            text += f" Now, back to your application: {state.asking}"
+        elif intent == "roles":
+            text += " Which role are you interested in?"
+        return text, "general_inquiry"
+
     def _converse(self, call_id: str, message: str) -> tuple:
         """Knowledge-base answer for one caller turn, with the call's
         conversation state (no AI model configured)."""
