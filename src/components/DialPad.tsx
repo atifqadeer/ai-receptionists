@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { telephonyApi, InboundCall } from '../utils/outboundApi';
+import { STATUS_LABEL, STATUS_TEXT } from '../utils/callStatus';
 
 // Make a Call > start screen: a phone dial pad. "Call" makes the AI agent
 // phone the number over the SIP Account (a real call, logged below with
@@ -16,13 +17,10 @@ const KEYS: Array<[string, string]> = [
 const LIVE = ['dialing', 'ringing', 'in_progress'];
 
 const STATUS: Record<string, [string, string]> = {
+  ...Object.fromEntries(Object.keys(STATUS_LABEL).map((k) => [k, [STATUS_TEXT[k] || 'text-gray-400', STATUS_LABEL[k]]])),
   dialing: ['text-amber-300', 'Dialling…'],
   ringing: ['text-amber-300', 'Ringing…'],
   in_progress: ['text-emerald-300', 'Connected'],
-  completed: ['text-gray-400', 'Completed'],
-  no_answer: ['text-orange-300', 'No answer'],
-  cancelled: ['text-gray-400', 'Cancelled'],
-  failed: ['text-red-300', 'Failed'],
 };
 
 const clean = (v: string) => v.replace(/[^\d+*#]/g, '').replace(/(?!^)\+/g, '').slice(0, 20);
@@ -263,7 +261,7 @@ export default function DialPad({ agentName, companyName, voice, browserReady, o
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-lg font-bold text-white">{agentName}</p>
-              <p className="text-sm text-gray-300">{companyName} · <span className="capitalize">{voice}</span> voice</p>
+              <p className="text-sm text-gray-300">{companyName} · {voice}</p>
               <p className="text-xs text-gray-400 mt-1">Type or tap a number, then press the green button. The agent greets them and answers from your knowledge base.</p>
             </div>
           </div>
@@ -311,7 +309,7 @@ export default function DialPad({ agentName, companyName, voice, browserReady, o
                   <div key={c.id}>
                     <div className="px-5 py-3 flex items-center gap-3 hover:bg-gray-800/40 cursor-pointer" onClick={() => setOpen(open === c.id ? null : c.id)}>
                       <div className="w-9 h-9 rounded-full bg-gray-800 flex items-center justify-center flex-shrink-0">
-                        <i className={`fa-solid ${c.status === 'failed' ? 'fa-phone-slash text-red-400' : c.status === 'no_answer' ? 'fa-phone-slash text-orange-400' : 'fa-arrow-up-right text-emerald-400'} text-sm`}></i>
+                        <i className={`fa-solid ${c.status === 'failed' ? 'fa-phone-slash text-red-400' : c.status === 'no_answer' ? 'fa-phone-slash text-orange-400' : c.status === 'dnc' ? 'fa-ban text-red-400' : c.status === 'hung_up' ? 'fa-phone-slash text-rose-400' : c.status === 'not_interested' ? 'fa-thumbs-down text-slate-300' : 'fa-arrow-up-right text-emerald-400'} text-sm`}></i>
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm text-white truncate">{c.caller_name || c.caller_number}</p>

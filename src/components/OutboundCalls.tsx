@@ -1,51 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { outboundApi, telephonyApi, CallsResponse, OutboundCall, CallNote } from '../utils/outboundApi';
+import { outboundApi, CallsResponse, OutboundCall, CallNote } from '../utils/outboundApi';
+import { STATUS_STYLE, OUTCOME_STYLE, statusLabel, outcomeLabel } from '../utils/callStatus';
 
-// Job Calls: applicants from the CRM webhook or a CSV are called by the AI
-// agent about a matching job. Calls run through the VoIP provider set in
-// Agent Setup > VoIP & Calling.
-
-const STATUS_STYLE: Record<string, string> = {
-  queued: 'bg-gray-700/60 text-gray-300',
-  dialing: 'bg-blue-500/15 text-blue-300',
-  ringing: 'bg-blue-500/15 text-blue-300',
-  in_progress: 'bg-violet-500/20 text-violet-300',
-  completed: 'bg-emerald-500/15 text-emerald-300',
-  no_answer: 'bg-amber-500/15 text-amber-300',
-  busy: 'bg-amber-500/15 text-amber-300',
-  failed: 'bg-red-500/15 text-red-300',
-  cancelled: 'bg-gray-700/60 text-gray-400',
-};
-const OUTCOME_STYLE: Record<string, string> = {
-  interested: 'bg-emerald-500/15 text-emerald-300',
-  not_interested: 'bg-gray-700/60 text-gray-300',
-  callback: 'bg-amber-500/15 text-amber-300',
-  do_not_call: 'bg-red-500/15 text-red-300',
-  no_response: 'bg-gray-700/60 text-gray-400',
-  unknown: 'bg-gray-700/60 text-gray-400',
-};
-const pretty = (s: string) => s.replace(/_/g, ' ');
-
-// Same fields as the CSV template columns.
-const SAMPLE_PAYLOAD = {
-  applicant_name: 'Sarah Jones', phone: '07700 900123', email: 'sarah@example.com',
-  job_title: 'Registered Nurse (RGN)', office: 'Oakwood Care Home', branch: 'Manchester',
-  salary: '£38,000 per year', benefits: '28 days holiday, pension, paid training',
-  qualifications: 'Active NMC registration and PIN', experience: 'At least 2 years in elderly care',
-  job_type: 'Full-time, permanent', working_hours: 'Day shifts, 37.5 hours a week',
-  job_description: 'Caring for 30 elderly residents in a nursing home',
-};
-
-function copy(text: string) {
-  navigator.clipboard?.writeText(text).catch(() => {});
-}
+// Job Calls: applicants from your CRM (webhook or API fetch, set up in
+// Settings > Calling > Webhooks) or a CSV are called by the AI agent
+// about a matching job. Calls run through the VoIP provider set in
+// Settings > Calling.
 
 export default function OutboundCalls() {
   const [data, setData] = useState<CallsResponse | null>(null);
-  const [publicUrl, setPublicUrl] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
-  const [showToken, setShowToken] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [transcriptOf, setTranscriptOf] = useState<OutboundCall | null>(null);
   const [previewOf, setPreviewOf] = useState<OutboundCall | null>(null);
@@ -57,7 +22,6 @@ export default function OutboundCalls() {
 
   useEffect(() => {
     refresh();
-    telephonyApi.get().then((s) => setPublicUrl(s.public_url)).catch(() => {});
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, []);
@@ -97,7 +61,6 @@ export default function OutboundCalls() {
   }
   if (!data) return <div className="text-gray-400 text-sm"><i className="fa-solid fa-spinner fa-spin mr-2"></i>Loading…</div>;
 
-  const webhookUrl = (publicUrl ? `${publicUrl}/api/outbound/webhook` : outboundApi.webhookUrl);
   const counts = data.calls.reduce<Record<string, number>>((acc, c) => {
     acc[c.status] = (acc[c.status] || 0) + 1;
     if (c.outcome === 'interested') acc.interested = (acc.interested || 0) + 1;
@@ -136,37 +99,24 @@ export default function OutboundCalls() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* CRM webhook */}
-        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+        {/* Where applicants come from */}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4 flex flex-col">
           <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-            <i className="fa-solid fa-link text-violet-400"></i>CRM Webhook
+            <i className="fa-solid fa-link text-violet-400"></i>From your CRM
           </h3>
-          <p className="text-sm text-gray-400">Set your recruitment CRM to POST each applicant and their matching job (JSON) to this URL.</p>
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Webhook URL</label>
-            <div className="flex gap-2">
-              <code className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 break-all">{webhookUrl}</code>
-              <button onClick={() => copy(webhookUrl)} className="px-3 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800" title="Copy"><i className="fa-regular fa-copy"></i></button>
-            </div>
-            {!publicUrl && <p className="text-xs text-amber-300 mt-1">This is a local address. A cloud CRM needs the public URL from Settings › Calling.</p>}
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Token (send as header <code>X-Webhook-Token</code>, or <code>?token=</code>)</label>
-            <div className="flex gap-2">
-              <code className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 break-all">
-                {showToken ? data.webhook_token : '•'.repeat(24)}
-              </code>
-              <button onClick={() => setShowToken(!showToken)} className="px-3 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800" title="Show"><i className={`fa-regular ${showToken ? 'fa-eye-slash' : 'fa-eye'}`}></i></button>
-              <button onClick={() => copy(data.webhook_token)} className="px-3 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800" title="Copy"><i className="fa-regular fa-copy"></i></button>
-              <button onClick={() => window.confirm('Create a new token? Your CRM will need the new one.') && act(telephonyApi.newToken, 'New webhook token created.')}
-                className="px-3 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800" title="New token"><i className="fa-solid fa-rotate"></i></button>
-            </div>
-          </div>
-          <details className="text-sm">
-            <summary className="cursor-pointer text-violet-300">Example payload</summary>
-            <pre className="mt-2 bg-gray-950 border border-gray-800 rounded-lg p-3 text-xs text-gray-300 overflow-x-auto">{JSON.stringify(SAMPLE_PAYLOAD, null, 2)}</pre>
-            <p className="text-xs text-gray-500 mt-1">The same fields as the CSV template. A list of applicants also works, and common CRM names such as mobile, full_name, position, pay_rate and requirements are recognised.</p>
-          </details>
+          <p className="text-sm text-gray-400">
+            Applicants your CRM sends to the webhook, or that the agent fetches from your CRM's API, are queued here automatically.
+          </p>
+          <ul className="text-sm text-gray-300 space-y-2.5">
+            <li className="flex gap-2">
+              <i className="fa-solid fa-link text-violet-400 mt-1 text-xs w-4"></i>
+              <span>Receive applicants by webhook, and send call results back<span className="block text-xs text-gray-500">Settings › Calling › Webhooks</span></span>
+            </li>
+            <li className="flex gap-2">
+              <i className="fa-solid fa-cloud-arrow-down text-violet-400 mt-1 text-xs w-4"></i>
+              <span>Fetch applicants from your CRM's API<span className="block text-xs text-gray-500">Settings › Calling › Webhooks</span></span>
+            </li>
+          </ul>
         </div>
 
         {/* CSV */}
@@ -228,14 +178,18 @@ export default function OutboundCalls() {
                       <div className="text-xs text-gray-400">{[c.job.employer, c.job.location, c.job.salary].filter(Boolean).join(' · ')}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_STYLE[c.status] || STATUS_STYLE.queued}`}>{pretty(c.status)}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_STYLE[c.status] || STATUS_STYLE.queued}`}>{statusLabel(c.status)}</span>
                       {c.next_attempt_at && c.status === 'queued' && (
                         <div className="text-xs text-gray-500 mt-1">retry {new Date(c.next_attempt_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                      )}
+                      {c.status === 'callback' && c.callback_when && (
+                        <div className="text-xs text-sky-300/80 mt-1"><i className="fa-regular fa-clock mr-1"></i>asked: {c.callback_when}</div>
                       )}
                       {c.error && <div className="text-xs text-red-300 mt-1 max-w-xs truncate" title={c.error}>{c.error}</div>}
                     </td>
                     <td className="px-4 py-3">
-                      {c.outcome ? <span className={`text-xs px-2 py-0.5 rounded-full ${OUTCOME_STYLE[c.outcome] || OUTCOME_STYLE.unknown}`}>{pretty(c.outcome)}</span> : <span className="text-gray-600">—</span>}
+                      {c.outcome ? <span className={`text-xs px-2 py-0.5 rounded-full ${OUTCOME_STYLE[c.outcome] || OUTCOME_STYLE.unknown}`}>{outcomeLabel(c.outcome)}</span> : <span className="text-gray-600">—</span>}
+                      {c.send_details && <div className="text-xs text-gray-400 mt-1"><i className="fa-regular fa-envelope mr-1"></i>send details</div>}
                     </td>
                     <td className="px-4 py-3 text-gray-300">{c.attempts}</td>
                     <td className="px-4 py-3">
@@ -392,7 +346,7 @@ function ScriptPreview({ call, onClose }: { call: OutboundCall; onClose: () => v
       <div className="px-5 py-3 border-t border-gray-800 space-y-2">
         <div className="text-xs text-gray-400 flex items-center gap-2">
           Reply as the applicant (e.g. "what's the salary?", "yes I'm interested", "call me later").
-          {outcome && <span className={`ml-auto px-2 py-0.5 rounded-full ${OUTCOME_STYLE[outcome] || OUTCOME_STYLE.unknown}`}>{pretty(outcome)}</span>}
+          {outcome && <span className={`ml-auto px-2 py-0.5 rounded-full ${OUTCOME_STYLE[outcome] || OUTCOME_STYLE.unknown}`}>{outcomeLabel(outcome)}</span>}
         </div>
         {ended ? (
           <button onClick={start} className="w-full py-2 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800 text-sm">Call ended. Start again</button>

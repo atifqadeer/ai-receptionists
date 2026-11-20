@@ -1,11 +1,12 @@
 import SetupForm from './SetupForm';
 import Settings from './Settings';
-import Automation from './Automation';
+import CallRules from './CallRules';
+import LanguageSettings from './LanguageSettings';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
 // One Settings page for everything: the agent (identity, scripts,
 // knowledge), calling (SIP account, inbound, outbound, call voice),
-// automation rules and system settings. Each group has its own tabs;
+// guardrails (call rules) and system settings. Each group has its own tabs;
 // the forms underneath are the same components as before, so what is
 // saved, and where, is unchanged.
 
@@ -20,6 +21,7 @@ const GROUPS: Group[] = [
       { id: 'identity', label: 'Identity & Voice', icon: 'fa-id-badge' },
       { id: 'behavior', label: 'Behavior & Scripts', icon: 'fa-comments' },
       { id: 'knowledge', label: 'Knowledge Base', icon: 'fa-book' },
+      { id: 'languages', label: 'Languages', icon: 'fa-language' },
     ],
   },
   {
@@ -29,23 +31,22 @@ const GROUPS: Group[] = [
       { id: 'provider', label: 'SIP / VoIP Account', icon: 'fa-server' },
       { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset' },
       { id: 'rules', label: 'Outbound Calling', icon: 'fa-clock' },
-      { id: 'voice', label: 'Call Voice & CRM', icon: 'fa-microphone-lines' },
+      { id: 'voice', label: 'Call Voice', icon: 'fa-microphone-lines' },
+      { id: 'webhooks', label: 'Webhooks', icon: 'fa-link' },
     ],
   },
   {
-    id: 'automation', label: 'Automation', icon: 'fa-gears', desc: 'Routing rules & workflows',
-    saveNote: 'Changes are saved automatically in this browser.',
-    tabs: [{ id: 'rules', label: 'Rules & Workflows', icon: 'fa-diagram-project' }],
+    id: 'automation', label: 'GuardRails', icon: 'fa-shield-halved', desc: 'Call rules & safeguards',
+    saveNote: 'Call Rules save to the backend with their own button.',
+    tabs: [{ id: 'calls', label: 'Call Rules', icon: 'fa-scale-balanced' }],
   },
   {
-    id: 'system', label: 'System', icon: 'fa-sliders', desc: 'Integrations, AI model & team',
-    saveNote: 'Saved in this browser with Save Settings.',
+    id: 'system', label: 'System', icon: 'fa-sliders', desc: 'Integrations, AI model & API keys',
+    saveNote: 'AI Model saves with its own button; the other tabs save as you type.',
     tabs: [
       { id: 'general', label: 'General', icon: 'fa-cog' },
       { id: 'integrations', label: 'Integrations', icon: 'fa-plug' },
       { id: 'ai', label: 'AI Model', icon: 'fa-brain' },
-      { id: 'telephony', label: 'Telephony Guide', icon: 'fa-tower-broadcast' },
-      { id: 'team', label: 'Team', icon: 'fa-users' },
       { id: 'api', label: 'API Keys', icon: 'fa-key' },
     ],
   },
@@ -130,8 +131,9 @@ export default function SettingsHub() {
       {/* Content. Agent and Calling share one form instance (it holds the
           VoIP settings across tabs), so edits survive switching tabs. */}
       <div key={group.id === 'calling' ? 'agent' : group.id}>
-        {(group.id === 'agent' || group.id === 'calling') && <SetupForm section={tab.id} />}
-        {group.id === 'automation' && <Automation />}
+        {(group.id === 'agent' || group.id === 'calling') && tab.id !== 'languages' && <SetupForm section={tab.id} />}
+        {group.id === 'agent' && tab.id === 'languages' && <LanguageSettings />}
+        {group.id === 'automation' && <CallRules />}
         {group.id === 'system' && <Settings section={tab.id} />}
       </div>
     </div>

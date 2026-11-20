@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { telephonyApi, InboundCall, InboundCallDetail, InboundStats, InboundStatus } from '../utils/outboundApi';
+import { STATUS_STYLE as SHARED_STYLE, ENDED_TALKING, statusLabel } from '../utils/callStatus';
 
 // Inbound Calls page: every call the agent answered on the inbound
 // extension, live and past. Search, filter, open a call to read its
 // transcript, play its recording and see what happened moment by moment.
 
 type Range = 'today' | '7d' | '30d' | 'all';
-type StatusFilter = 'all' | 'live' | 'completed' | 'failed';
+type StatusFilter = 'all' | 'live' | 'completed' | 'decided' | 'failed';
 
 const input = 'bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 outline-none';
 
@@ -22,13 +23,7 @@ const isLive = (c: InboundCall) => c.status === 'ringing' || c.status === 'in_pr
 const cleanName = (n: string) => (n || '').trim().replace(/^["']+|["']+$/g, '').trim();
 const who = (c: InboundCall) => (cleanName(c.caller_name) ? `${cleanName(c.caller_name)} (${c.caller_number})` : c.caller_number);
 
-const STATUS_STYLE: Record<string, string> = {
-  ringing: 'bg-amber-500/15 text-amber-300',
-  in_progress: 'bg-emerald-500/15 text-emerald-300',
-  completed: 'bg-gray-700/60 text-gray-300',
-  failed: 'bg-red-500/15 text-red-300',
-};
-const STATUS_LABEL: Record<string, string> = { ringing: 'Ringing', in_progress: 'Live', completed: 'Completed', failed: 'Failed' };
+const STATUS_STYLE: Record<string, string> = { ...SHARED_STYLE, completed: 'bg-gray-700/60 text-gray-300', in_progress: 'bg-emerald-500/15 text-emerald-300' };
 
 // What each event-log entry means, for the timeline.
 function describe(e: any): string {
@@ -49,7 +44,7 @@ function describe(e: any): string {
 
 function toCsv(calls: InboundCall[]) {
   const q = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
-  const rows = calls.map((c) => [c.started_at, c.caller_number, c.caller_name, c.extension, STATUS_LABEL[c.status] || c.status,
+  const rows = calls.map((c) => [c.started_at, c.caller_number, c.caller_name, c.extension, statusLabel(c.status),
     mmss(seconds(c)), c.ended_by || '', c.transcript.map((m) => `${m.role === 'agent' ? 'Agent' : 'Caller'}: ${m.text}`).join(' | ')].map(String).map(q).join(','));
   return ['Started,Caller number,Caller name,Extension,Status,Duration,Ended by,Transcript', ...rows].join('\n');
 }
@@ -99,7 +94,9 @@ export default function InboundCalls() {
     return calls.filter((c) => {
       if (new Date(c.started_at).getTime() < since) return false;
       if (status === 'live' && !isLive(c)) return false;
-      if ((status === 'completed' || status === 'failed') && c.status !== status) return false;
+      if (status === 'completed' && !ENDED_TALKING.includes(c.status)) return false;
+      if (status === 'failed' && c.status !== 'failed') return false;
+      if (status === 'decided' && !['dnc', 'not_interested', 'wrong_number', 'callback', 'hung_up', 'dropped'].includes(c.status)) return false;
       if (!q) return true;
       return c.caller_number.toLowerCase().includes(q) || (c.caller_name || '').toLowerCase().includes(q)
         || c.transcript.some((m) => m.text.toLowerCase().includes(q));
@@ -173,6 +170,7 @@ export default function InboundCalls() {
           <option value="all">All statuses</option>
           <option value="live">Live now</option>
           <option value="completed">Completed</option>
+          <option value="decided">DNC / Not interested / Hung up</option>
           <option value="failed">Failed</option>
         </select>
         <select value={range} onChange={(e) => setRange(e.target.value as Range)} className={input}>
@@ -207,7 +205,7 @@ export default function InboundCalls() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm text-white truncate">{who(c)}</span>
-                      <span className={`ml-auto text-[11px] px-2 py-0.5 rounded-full ${STATUS_STYLE[c.status] || ''}`}>{STATUS_LABEL[c.status] || c.status}</span>
+                      <span className={`ml-auto text-[11px] px-2 py-0.5 rounded-full ${STATUS_STYLE[c.status] || ''}`}>{statusLabel(c.status)}</span>
                     </div>
                     <div className="text-xs text-gray-500 mt-0.5">{fmtTime(c.started_at)} · {mmss(seconds(c))}</div>
                     <div className="text-xs text-gray-400 mt-1 truncate">
@@ -251,7 +249,7 @@ export default function InboundCalls() {
 
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                 {[
-                  ['Status', STATUS_LABEL[selectedCall.status] || selectedCall.status],
+                  ['Status', statusLabel(selectedCall.status) + (selectedCall.callback_when ? ` (${selectedCall.callback_when})` : '')],
                   ['Duration', mmss(seconds(selectedCall))],
                   ['Answered', selectedCall.answered_at ? new Date(selectedCall.answered_at).toLocaleTimeString() : '—'],
                   ['Ended by', selectedCall.ended_by ? (selectedCall.ended_by === 'agent' ? 'Agent' : 'Caller') : isLive(selectedCall) ? 'In progress' : '—'],

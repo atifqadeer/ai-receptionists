@@ -88,6 +88,20 @@ export async function startAgentCall(callerName?: string, callerNumber?: string)
 
 // The agent's answer to one caller message, or null when the backend
 // could not be reached (the caller then falls back to local matching).
+// A text chat with the agent (the Chat page's Test chat): it answers like
+// the website chat, with the chat welcome and goodbye, not phone wording.
+export async function startAgentChat(): Promise<{ callId: string; greeting: string; goodbye: string } | null> {
+  try {
+    const data = await request<{ call_id: string; greeting: string; goodbye: string }>('/api/agent/call/start', {
+      method: 'POST',
+      body: JSON.stringify({ channel: 'chat' }),
+    }, 8000);
+    return { callId: data.call_id, greeting: data.greeting, goodbye: data.goodbye };
+  } catch {
+    return null;
+  }
+}
+
 export async function askAgent(callId: string, message: string): Promise<{ message: string; intent: string } | null> {
   try {
     const data = await request<{ message: string; intent: string }>('/api/agent/chat', {

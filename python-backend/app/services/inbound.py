@@ -13,7 +13,7 @@ call simulators) until the caller says goodbye or hangs up.
   one registration places and answers calls.
 - speaking and listening: sip_dialer.SipCallSession (barge-in, Whisper)
 - the replies: AIAgent.process_message, run on the main event loop
-- a log of each call (caller, transcript): data/inbound_calls.json, and a
+- a log of each call (caller, transcript): MySQL (calls "inbound_calls"), and a
   recording + event log in data/call_audit/
 
 A watchdog thread keeps the extension registered: it retries every 30
@@ -32,11 +32,13 @@ from typing import Optional
 
 from loguru import logger
 
+from app.core import store
+from app.services import call_rules
 from app.services import telephony
+from app.services import call_intents, dnc
 from app.services.sip_dialer import (AUDIT_DIR, RING_TIMEOUT, SipCallSession, SipError, SipPhone, _account,
                                       cancel_invite, dial_target, sip_phone, whisper_model)
 
-_CALLS_FILE = Path(__file__).resolve().parents[2] / "data" / "inbound_calls.json"
 KEEP_CALLS = 1000           # newest inbound calls kept in the log (recordings: sip_dialer.AUDIT_KEEP)
 WATCHDOG_SECONDS = 30       # how often the registration is checked
 SILENT_TURNS = 3            # caller silent this many times in a row: goodbye
@@ -55,16 +57,14 @@ _store_lock = threading.Lock()
 
 def _load() -> list:
     try:
-        if _CALLS_FILE.exists():
-            return json.loads(_CALLS_FILE.read_text(encoding="utf-8"))
+        return store.load_list("inbound_calls")
     except Exception as e:
         logger.warning(f"Could not read inbound calls: {e}")
     return []
 
 
 def _save(calls: list) -> None:
-    _CALLS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _CALLS_FILE.write_text(json.dumps(calls[-KEEP_CALLS:], indent=2, ensure_ascii=False), encoding="utf-8")
+    store.save_list("inbound_calls", calls[-KEEP_CALLS:])
 
 
 def list_calls(direction: str = "inbound") -> list:
@@ -137,7 +137,12 @@ def stats(calls: list) -> dict:
     return {
         "total": len(calls),
         "today": sum(1 for c in calls if (c.get("started_at") or "").startswith(today)),
-        "completed": sum(1 for c in calls if c.get("status") == "completed"),
+        # A call that ended with a decision (DNC, not interested, ...) was still answered and completed.
+        "completed": sum(1 for c in calls if c.get("status") in ("completed", "dnc", "not_interested", "wrong_number",
+                                                                  "callback", "voicemail", "hung_up", "dropped")),
+        "hung_up": sum(1 for c in calls if c.get("status") == "hung_up"),
+        "dnc": sum(1 for c in calls if c.get("status") == "dnc"),
+        "not_interested": sum(1 for c in calls if c.get("status") == "not_interested"),
         "failed": sum(1 for c in calls if c.get("status") == "failed"),
         "live": sum(1 for c in calls if c.get("status") in ("ringing", "in_progress")),
         "avg_seconds": round(sum(durations) / len(durations)) if durations else 0,
@@ -376,6 +381,44 @@ class InboundCallSession(SipCallSession):
     def _greeting(self, cfg) -> str:
         return (self.inbound.get("greeting") or cfg.greeting or "Hello, how can I help you?").strip()
 
+    # What the agent says when the caller decides (see call_intents).
+    DECISION_LINES = {
+        "do_not_call": ("I completely understand, and I'm sorry for disturbing you. I've added your number to our "
+                        "do-not-call list, so you won't be called again. Goodbye."),
+        "not_interested": "No problem at all, thank you for letting me know. Have a great day. Goodbye.",
+        "end_call": "Of course. Thank you for your time. Goodbye.",
+        "wrong_number": "I'm so sorry about that, I must have the wrong number. Have a good day. Goodbye.",
+        "abusive": "I'm sorry you feel that way. I'll end the call here. Goodbye.",
+        "voicemail": "",
+        "callback": "",
+    }
+    # Inbound: the caller rang us, so only these end the call (and "not
+    # interested" only on its own: "I'm not interested in X, I want Y" is a request).
+    DECISIONS = ("do_not_call", "abusive", "wrong_number", "not_interested", "end_call")
+    STANDALONE_WORDS = 8
+
+    def _decision(self, heard: str, turn_no: int, greeting: str) -> "tuple | None":
+        """(outcome, what to say) when the caller has decided, else None."""
+        decision = call_intents.detect(heard, allow_voicemail=self.DIRECTION == "outbound" and turn_no <= 2)
+        if decision is None and turn_no == 1 and self.DIRECTION == "outbound" and call_intents.is_bare_no(heard) \
+                and re.search(r"\b(interested|looking)\b", greeting.lower()):
+            decision = "not_interested"      # "no" to "are you looking for a new role?"
+        if decision not in self.DECISIONS:
+            return None
+        if decision in ("not_interested", "wrong_number") and self.DIRECTION == "inbound" \
+                and len(heard.split()) > self.STANDALONE_WORDS:
+            return None
+        said = self.DECISION_LINES.get(decision, "")
+        if decision == "voicemail":
+            cfg = self.agent.get_config()
+            said = (f"Hello, this is {cfg.agent_name} from {cfg.company_name}. Sorry we missed you; "
+                    f"we'll try you again later. Goodbye.")
+        if decision == "callback":
+            when = call_intents.callback_when(heard)
+            said = (f"No problem at all. We'll call you back {when}. Goodbye." if when else
+                    "No problem at all. We'll call you back at a better time. Goodbye.")
+        return decision, said
+
     def _farewell(self, cfg) -> str:
         return (cfg.farewell or "Thank you for calling. Goodbye.").strip()
 
@@ -426,6 +469,8 @@ class InboundCallSession(SipCallSession):
             deadline = time.time() + 60 * max(1, int(self.inbound.get("max_minutes") or 15))
 
             def turn(text: str, end: bool = False):
+                if end:
+                    self.ending = True
                 if not self._answered():
                     return None
                 transcript.append({"role": "agent", "text": text})
@@ -436,7 +481,7 @@ class InboundCallSession(SipCallSession):
                 return barge
 
             barge = turn(greeting)
-            silent, unclear = 0, 0
+            silent, unclear, turn_no = 0, 0, 0
             while self._answered() and not self.hangup_requested:
                 heard = self.listen(barge)
                 barge = None
@@ -457,7 +502,25 @@ class InboundCallSession(SipCallSession):
                     barge = turn("Sorry, I didn't quite catch that. Could you say it again?")
                     continue
                 unclear = 0
+                turn_no += 1
                 transcript.append({"role": "caller", "text": heard})
+                decided = self._decision(heard, turn_no, greeting)
+                if decided:
+                    outcome, said = decided
+                    self.outcome = outcome
+                    extra = {"callback_when": call_intents.callback_when(heard)} if outcome == "callback" else {}
+                    _update_call(self.call_id, outcome=outcome, outcome_said=heard, **extra)
+                    self.audit.event("decision", outcome=outcome, heard=heard)
+                    logger.info(f"{self.DIRECTION.title()} call {self.call_id[:8]}: {outcome} ({heard!r})")
+                    if outcome == "do_not_call":
+                        try:
+                            dnc.add(self.caller_number, "dial pad" if self.DIRECTION == "outbound" else "inbound call",
+                                    heard, self.call_id, self.caller_name)
+                        except ValueError:
+                            pass   # no caller number (anonymous)
+                    if said:
+                        turn(said, end=True)
+                    break
                 if _GOODBYE.search(heard):
                     turn(farewell, end=True)
                     break
@@ -508,6 +571,13 @@ class InboundCallSession(SipCallSession):
                 self.agent.end_call(self.conv_id)
             except Exception:
                 pass
+            outcome = getattr(self, "outcome", None)
+            if final == "completed" and outcome:
+                final = "voicemail" if outcome == "voicemail" else call_intents.STATUS_FOR.get(outcome, final)
+            elif final == "completed" and not self.we_hung_up and not self.ending and not self.hangup_requested:
+                final = "hung_up"          # the other person put the phone down mid-conversation
+                self.audit.event("hung_up", by="caller")
+            call_rules.after_call(self.caller_number, final, self.call_id, self.caller_name)
             _update_call(self.call_id, status=final, ended_at=_now(), transcript=transcript,
                          ended_by="agent" if self.we_hung_up else "caller")
             logger.info(f"{self.DIRECTION.title()}: call with {self.caller_number} ended ({final})")
@@ -561,6 +631,8 @@ class DialedCallSession(InboundCallSession):
     def _farewell(self, cfg) -> str:
         return f"Thank you for your time. Have a great day. Goodbye."
 
+    DECISIONS = ("do_not_call", "abusive", "wrong_number", "not_interested", "end_call", "voicemail", "callback")
+
     def _adapt(self, reply: str) -> str:
         # The receptionist's lines are written for people who rang us.
         reply = re.sub(r"\b(thank you|thanks) (so much )?for calling( [A-Z][\w&' ]*?)?([.!,])", r"Thank you for your time\4", reply, flags=re.I)
@@ -613,6 +685,14 @@ def dial(number: str, name: str, agent, loop: asyncio.AbstractEventLoop, opening
     missing = telephony.missing_settings(settings)
     if missing:
         raise SipError("The SIP Account is not set up yet: missing " + ", ".join(missing))
+    listed = dnc.get(number)
+    if listed:
+        raise SipError(f"{number} is on the Do Not Call list (they asked not to be called on "
+                       f"{(listed.get('added_at') or '')[:10]}). Remove it from the list first if they have agreed to be called.")
+    blocked = call_rules.check(number)
+    if blocked:
+        raise SipError(blocked[1] + " (Settings › GuardRails › Call Rules)")
+    call_rules.note_call(number)
     session = DialedCallSession(settings, number, name, loop, agent, opening=opening)
     threading.Thread(target=session.run, daemon=True, name=f"dial-{session.call_id[:8]}").start()
     return session.call_id

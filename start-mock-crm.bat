@@ -2,7 +2,7 @@
 REM ============================================
 REM  Mock CRM - a pretend third-party CRM for testing (port 8100)
 REM  The AI Receptionist fetches applicants from it:
-REM  Settings > Calling > Call Voice & CRM > Fetch applicants from your CRM
+REM  Settings > Calling > Webhooks > Fetch applicants from your CRM (API)
 REM ============================================
 cd /d "%~dp0"
 if not exist "python-backend\.venv\Scripts\python.exe" (

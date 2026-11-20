@@ -16,7 +16,8 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from loguru import logger
 
-from app.services import inbound, outbound, telephony
+from app.services import call_rules
+from app.services import dnc, inbound, outbound, telephony
 from app.services.knowledge import KnowledgeBase
 
 telephony_router = APIRouter()
@@ -193,6 +194,30 @@ async def crm_pull():
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# ---- Do Not Call list: numbers that asked not to be called again ----
+
+@outbound_router.get("/dnc")
+async def dnc_list():
+    return {"numbers": await asyncio.to_thread(dnc.entries)}
+
+
+@outbound_router.post("/dnc")
+async def dnc_add(data: dict):
+    number = str(data.get("number") or "").strip()
+    try:
+        entry = await asyncio.to_thread(dnc.add, number, "added in the dashboard", "", "", str(data.get("name") or "")[:80])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return entry
+
+
+@outbound_router.delete("/dnc/{number}")
+async def dnc_remove(number: str):
+    if not await asyncio.to_thread(dnc.remove, number):
+        raise HTTPException(status_code=404, detail="That number is not on the Do Not Call list")
+    return {"ok": True}
+
+
 @outbound_router.get("/crm/status")
 async def crm_status():
     return outbound.crm_status()
@@ -219,8 +244,12 @@ async def csv_template():
 
 @outbound_router.post("/calls/{call_id}/dial")
 async def dial_now(call_id: str):
-    if not outbound.get_call(call_id):
+    call = outbound.get_call(call_id)
+    if not call:
         raise HTTPException(status_code=404, detail="Call not found")
+    blocked = call_rules.check(call["applicant"]["phone"])
+    if blocked:
+        raise HTTPException(status_code=409, detail=blocked[1])
     s = telephony.load_settings()
     if not telephony.is_configured(s):
         raise HTTPException(status_code=400, detail="VoIP is not set up: missing " + ", ".join(telephony.missing_settings(s)))

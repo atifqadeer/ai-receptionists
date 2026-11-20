@@ -3,6 +3,7 @@ import { useLocalStorage } from '../hooks/useLocalStorage';
 import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
 import { syncAgentSettings, startAgentCall, askAgent, endAgentCall } from '../utils/agentApi';
 import DialPad from './DialPad';
+import { voiceApi } from '../utils/voiceApi';
 
 interface CallMessage {
   id: number;
@@ -24,15 +25,6 @@ const FAQ_STOPWORDS = new Set(['what', 'when', 'where', 'which', 'your', 'yours'
 const keyWords = (t: string) => t.toLowerCase().split(/[^a-z0-9]+/)
   .filter(w => w.length >= 3 && !FAQ_STOPWORDS.has(w))
   .map(w => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w));
-
-const VOICE_PROFILES: Record<string, { rate: number; pitch: number; gender: 'male' | 'female' }> = {
-  skylar: { rate: 1.0, pitch: 1.15, gender: 'female' },
-  daniel: { rate: 0.95, pitch: 0.85, gender: 'male' },
-  gemma: { rate: 0.95, pitch: 1.2, gender: 'female' },
-  parker: { rate: 1.05, pitch: 0.95, gender: 'male' },
-  archie: { rate: 1.05, pitch: 1.1, gender: 'male' },
-  jacqueline: { rate: 0.98, pitch: 1.05, gender: 'female' },
-};
 
 export default function RealCallSimulator() {
   const [messages, setMessages] = useState<CallMessage[]>([]);
@@ -67,6 +59,42 @@ export default function RealCallSimulator() {
   // the backend agent from the knowledge base (and the AI model, when an
   // OpenAI key is configured). null = backend offline, answer locally.
   const backendCallIdRef = useRef<string | null>(null);
+  // The live voice (Deepgram / Cartesia, through the backend). Without one
+  // the browser's own voices are used.
+  const liveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const finishSpeechRef = useRef<(() => void) | null>(null);
+  const liveTtsRef = useRef(false);
+  const [voiceLabel, setVoiceLabel] = useState('Browser voice');
+
+  useEffect(() => {
+    voiceApi.getSettings().then((s) => {
+      liveTtsRef.current = s.tts_active !== 'windows';
+      if (s.tts_active === 'deepgram') {
+        const id = s.deepgram.tts_voice.replace(/^aura-2-|-en$/g, '');
+        setVoiceLabel(`${id.charAt(0).toUpperCase()}${id.slice(1)} (Deepgram)`);
+      } else if (s.tts_active === 'cartesia') {
+        setVoiceLabel(`${s.cartesia.voice_name || 'Cartesia voice'} (Cartesia)`);
+      } else {
+        setVoiceLabel('Browser voice (no live voice set up)');
+      }
+    }).catch(() => { liveTtsRef.current = false; });
+  }, []);
+
+  // Stop whatever the agent is saying (live audio or browser speech).
+  const stopSpeaking = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    const audio = liveAudioRef.current;
+    liveAudioRef.current = null;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute('src');
+    }
+    const finish = finishSpeechRef.current;
+    finishSpeechRef.current = null;
+    finish?.();
+  };
 
   // Keep recognition running for the whole call. It is restarted from
   // recognition.onend whenever the browser stops it (silence timeouts,
@@ -133,7 +161,7 @@ export default function RealCallSimulator() {
           recognitionRef.current.abort();
         } catch (e) {}
       }
-      window.speechSynthesis.cancel();
+      stopSpeaking();
       if (audioContextRef.current) {
         audioContextRef.current.close();
       }
@@ -364,47 +392,26 @@ export default function RealCallSimulator() {
     await speakText(response);
   }, [detectIntent, generateResponse]);
 
-  // Find browser voice
+  // The browser's own voice: only used when no live voice is set up, or
+  // the backend can't be reached.
   const findBrowserVoice = (): SpeechSynthesisVoice | null => {
     const voices = window.speechSynthesis.getVoices();
-    const profile = VOICE_PROFILES[identity.voice] || VOICE_PROFILES.skylar;
-    
-    const keywords = profile.gender === 'female' 
-      ? ['female', 'woman', 'zira', 'samantha', 'victoria', 'karen']
-      : ['male', 'man', 'david', 'daniel', 'alex', 'fred', 'tom'];
-    
-    for (const keyword of keywords) {
-      const match = voices.find(v => v.name.toLowerCase().includes(keyword.toLowerCase()));
-      if (match) return match;
-    }
-    
     return voices.find(v => v.lang.startsWith('en')) || voices[0] || null;
   };
 
-  // Speak text
+  // Speak text: the live voice streamed from the backend (it starts
+  // playing on the first audio), else the browser's voice.
   const speakText = (text: string): Promise<void> => {
     return new Promise((resolve) => {
-      if (!speechSynthesisSupported) {
-        resolve();
-        return;
-      }
+      stopSpeaking();
 
-      window.speechSynthesis.cancel();
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      const voice = findBrowserVoice();
-      if (voice) utterance.voice = voice;
-
-      const profile = VOICE_PROFILES[identity.voice] || VOICE_PROFILES.skylar;
-      utterance.rate = profile.rate * identity.speakingRate;
-      utterance.pitch = profile.pitch * identity.pitch;
-
-      // Track which utterance is current so a late onend from an
+      // Track which utterance is current so a late end event from an
       // interrupted utterance cannot clear the state of its successor.
       const seq = ++utteranceSeqRef.current;
       currentUtteranceRef.current = normalizeSpeech(text);
+      let done = false;
 
-      utterance.onstart = () => {
+      const onStart = () => {
         setIsSpeaking(true);
         // The microphone stays ON while the agent speaks when barge-in
         // is allowed — that is what makes interruption possible. It is
@@ -417,6 +424,9 @@ export default function RealCallSimulator() {
       };
 
       const finish = () => {
+        if (done) return;
+        done = true;
+        if (finishSpeechRef.current === finish) finishSpeechRef.current = null;
         if (seq === utteranceSeqRef.current) {
           setIsSpeaking(false);
           currentUtteranceRef.current = '';
@@ -425,10 +435,39 @@ export default function RealCallSimulator() {
         }
         resolve();
       };
-      utterance.onend = finish;
-      utterance.onerror = finish;
+      finishSpeechRef.current = finish;
 
-      window.speechSynthesis.speak(utterance);
+      const speakWithBrowser = () => {
+        if (!speechSynthesisSupported) { finish(); return; }
+        const utterance = new SpeechSynthesisUtterance(text);
+        const voice = findBrowserVoice();
+        if (voice) utterance.voice = voice;
+        utterance.rate = identity.speakingRate || 1;
+        utterance.pitch = identity.pitch || 1;
+        utterance.onstart = onStart;
+        utterance.onend = finish;
+        utterance.onerror = finish;
+        window.speechSynthesis.speak(utterance);
+      };
+
+      if (!liveTtsRef.current) { speakWithBrowser(); return; }
+
+      const audio = new Audio(voiceApi.speakUrl(text));
+      liveAudioRef.current = audio;
+      let started = false;
+      let failed = false;
+      const fail = () => {
+        if (failed || liveAudioRef.current !== audio) return;
+        failed = true;
+        liveAudioRef.current = null;
+        // Nothing played yet: say it with the browser voice instead.
+        if (!started && seq === utteranceSeqRef.current && !done) speakWithBrowser();
+        else finish();
+      };
+      audio.onplaying = () => { if (!started) { started = true; onStart(); } };
+      audio.onended = () => { if (liveAudioRef.current === audio) liveAudioRef.current = null; finish(); };
+      audio.onerror = fail;
+      audio.play().catch(fail);
     });
   };
 
@@ -487,7 +526,7 @@ export default function RealCallSimulator() {
         // BARGE-IN: the caller is speaking over the agent — stop the
         // agent immediately, and take the caller's finished sentence
         // as the next turn.
-        window.speechSynthesis.cancel();
+        stopSpeaking();
         setIsSpeaking(false);
         if (final) {
           setTranscript(final);
@@ -651,7 +690,7 @@ export default function RealCallSimulator() {
       } catch (e) {}
     }
 
-    window.speechSynthesis.cancel();
+    stopSpeaking();
     stopMicrophone();
     
     if (callStatus === 'active') {
@@ -705,7 +744,7 @@ export default function RealCallSimulator() {
         <DialPad
           agentName={identity.agentName}
           companyName={identity.companyName}
-          voice={identity.voice}
+          voice={voiceLabel}
           browserReady={speechRecognitionSupported && speechSynthesisSupported}
           onBrowserCall={(number, name) => startCall(number, name)}
         />
@@ -915,7 +954,7 @@ export default function RealCallSimulator() {
             </div>
             <div className="flex justify-between">
               <span className="text-gray-400">Voice</span>
-              <span className="text-white capitalize">{identity.voice}</span>
+              <span className="text-white">{voiceLabel}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-400">Duration</span>

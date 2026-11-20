@@ -18,6 +18,16 @@ from typing import Optional
 # intent -> pattern. Checked in this order: the first match wins, so the
 # specific questions (address, contact) come before the company's name.
 PATTERNS = {
+    # "Where did you get my number?" (before the contact details: "number")
+    "how_number": (
+        r"\b((how|where|from where) (did |do |have |had )?(you|u|your company) (get|got|find|found|obtain\w*|take|took) "
+        r"(my|this|me|the) ?(number|details|contact|phone number|info)?|who gave you my (number|details)|"
+        r"why do you have my (number|details)|where('?s| is| did) my (number|details) (come )?from)"),
+    # "Why did you call me?" / "What is this call about?"
+    "why_call": (
+        r"\b(why (did|are|were|have|do) (you|u) (call\w*|ring\w*|phon\w*|contact\w*)( me)?|"
+        r"what (is|was|'?s) (this|the|your) call (about|regarding|for)|what are you calling (about|for)|"
+        r"why (is|are) (you|someone|somebody) calling|what do you want( from me)?|why me)\b"),
     "office_hours": (
         r"\b((office|opening|business|working) hours of (the|your) (company|office)|(your|the) (office|opening|business) hours|"
         r"when (is|are) (your|the) (office|company) open|when are you open|what time do you (open|close))\b"),
@@ -68,6 +78,13 @@ def answer(intent: str, company: str, profile: dict, roles: Optional[list] = Non
     phoned them ("I'm calling from ..."), rather than them us."""
     profile = profile or {}
     company = _clean(company) or "our company"
+    if intent == "how_number":
+        return (f"Your details are registered with {company} as a job applicant, which is why we're "
+                f"{'calling you' if calling else 'in touch'} about job opportunities. If you'd rather not be "
+                f"contacted, just tell me and I'll make sure we don't call you again.")
+    if intent == "why_call":
+        return (f"{'I am' if calling else 'We were'} calling from {company} about job opportunities that may match "
+                f"your experience. Are you currently looking for a new role?")
     if intent == "company_name":
         return f"I'm calling from {company}." if calling else f"You're speaking with {company}."
     if intent == "roles":

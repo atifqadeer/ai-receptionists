@@ -46,7 +46,7 @@ Other endpoints: `GET /api/v1/applicants/{id}`, `PATCH /api/v1/applicants/{id}`
 
 ## Connect the AI Receptionist
 
-Agent Setup > Call Voice & CRM > **Fetch applicants from your CRM**:
+Settings > Calling > Webhooks > **Fetch applicants from your CRM (API)**:
 
 - CRM API URL: `http://127.0.0.1:8100/api/v1/applicants?status=new`
 - CRM API key: the `api_key` from `config.json`

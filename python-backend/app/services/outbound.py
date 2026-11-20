@@ -10,7 +10,7 @@ job data and the knowledge base, and records the outcome (interested, not
 interested, call back, do not call). The outcome can be sent back to the
 CRM through the result webhook.
 
-Calls are stored in data/outbound_calls.json.
+Calls are stored in MySQL (calls "outbound_calls").
 """
 
 import asyncio
@@ -26,11 +26,14 @@ from typing import Optional
 import httpx
 from loguru import logger
 
+from app.core import store
+from app.services import call_rules
 from app.services import telephony
 from app.services.knowledge import KnowledgeBase
 from app.services import company_facts
+from app.services import call_intents, dnc, language_settings
+from app.services import chat_language
 
-_CALLS_FILE = Path(__file__).resolve().parents[2] / "data" / "outbound_calls.json"
 _lock = asyncio.Lock()
 
 # Builds the agent's side of a call (CallConversation) for a call record.
@@ -85,7 +88,8 @@ _ALIASES = {
     "job_description": ["description", "jobdescription", "duties", "responsibilities", "summary", "job_summary"],
 }
 
-_FINAL = {"completed", "no_answer", "busy", "failed", "cancelled"}
+_FINAL = {"completed", "no_answer", "busy", "failed", "cancelled",
+          "dnc", "not_interested", "wrong_number", "callback", "hung_up", "dropped"}
 
 
 def _norm_key(k: str) -> str:
@@ -147,16 +151,14 @@ def _now() -> str:
 
 def _load() -> list:
     try:
-        if _CALLS_FILE.exists():
-            return json.loads(_CALLS_FILE.read_text(encoding="utf-8"))
+        return store.load_list("outbound_calls")
     except Exception as e:
         logger.warning(f"Could not read outbound calls: {e}")
     return []
 
 
 def _save(calls: list) -> None:
-    _CALLS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _CALLS_FILE.write_text(json.dumps(calls, indent=2), encoding="utf-8")
+    store.save_list("outbound_calls", calls)
 
 
 def list_calls() -> list:
@@ -193,6 +195,10 @@ async def add_records(records: list, source: str) -> dict:
                 rejected.append({"row": i, "reason": "missing or invalid phone" if not phone else "missing job_title",
                                  "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip()})
                 continue
+            if dnc.contains(phone):
+                rejected.append({"row": i, "reason": "on the Do Not Call list",
+                                 "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip()})
+                continue
             dup = next((c for c in calls if c["status"] not in _FINAL and (
                 (rec.get("applicant_id") and rec.get("job_id") and c["applicant"].get("applicant_id") == rec.get("applicant_id")
                  and c["job"].get("job_id") == rec.get("job_id"))
@@ -226,14 +232,14 @@ async def add_records(records: list, source: str) -> dict:
 
 # ---- pulling applicants from the CRM's API ----
 
-_CRM_STATE = Path(__file__).resolve().parents[2] / "data" / "crm_import.json"
 _crm_lock = asyncio.Lock()
 
 
 def _crm_state() -> dict:
     try:
-        return json.loads(_CRM_STATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return store.get_doc("crm_import") or {"imported": [], "last": None}
+    except Exception as e:
+        logger.warning(f"Could not read the CRM import state: {e}")
         return {"imported": [], "last": None}
 
 
@@ -265,7 +271,7 @@ async def pull_from_crm() -> dict:
     settings = telephony.load_settings()
     url = (settings.get("crm_api_url") or "").strip()
     if not url:
-        raise ValueError("Set the CRM API URL first (Agent Setup > Call Voice & CRM).")
+        raise ValueError("Set the CRM API URL first (Settings > Calling > Webhooks).")
     headers = {"Accept": "application/json"}
     key = (settings.get("crm_api_key") or "").strip()
     if key:
@@ -309,8 +315,7 @@ async def pull_from_crm() -> dict:
         summary = {"at": started, "url": url, "fetched": len(items), "added": result["added"],
                    "already_imported": already + len(result["skipped"]), "rejected": result["rejected"]}
         st.update(imported=sorted(seen), last=summary)
-        _CRM_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _CRM_STATE.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+        store.put_doc("crm_import", st)
     logger.info(f"CRM pull: {len(items)} fetched, {result['added']} queued, {summary['already_imported']} already imported, "
                 f"{len(result['rejected'])} rejected")
     return summary
@@ -331,7 +336,7 @@ async def _maybe_pull_crm() -> None:
         logger.warning(f"CRM pull failed: {e}")
         st = _crm_state()
         st["last"] = {"at": _now(), "url": settings.get("crm_api_url"), "error": str(e)}
-        _CRM_STATE.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+        store.put_doc("crm_import", st)
 
 
 async def delete_call(call_id: str) -> bool:
@@ -351,7 +356,7 @@ async def request_dial(call_ids: Optional[list] = None) -> int:
     async with _lock:
         calls = _load()
         for c in calls:
-            if (call_ids is None or c["id"] in call_ids) and c["status"] in ("queued", "no_answer", "busy", "failed"):
+            if (call_ids is None or c["id"] in call_ids) and c["status"] in ("queued", "no_answer", "busy", "failed", "hung_up", "callback"):
                 c["status"] = "queued"
                 c["dial_requested"] = True
                 c["next_attempt_at"] = None
@@ -382,9 +387,6 @@ def opening_pitch(call: dict, agent_name: str, company: str) -> str:
 
 
 _PATTERNS = [
-    ("do_not_call", r"\b(don'?t|do not|stop|never) (call|ring|contact)|remove (me|my number)|take me off"),
-    ("callback", r"\b(call (me )?(back|later|tomorrow)|ring (me )?back|not a good time|bad time|busy right now|i'?m (driving|at work|busy)|can'?t talk)\b"),
-    ("not_interested", r"\b(not interested|no thanks?|no thank you|not looking|already (found|got|have) a (job|position|role)|i'?ll pass|not for me)\b"),
     ("repeat", r"\b(repeat|say (that|it) again|pardon|didn'?t (hear|catch)|come again|what did you say)\b|^\W*(sorry|what|huh|eh)\W*(what|sorry)?\W*$"),
     ("hello", r"^\W*(hello|hi|hey|hiya)\W*(hello|hi|there)?\W*$|\b(are you (still )?there|can you hear me)\b"),
     ("identity", r"\b(who (is this|are you|is calling)|where are you calling from|what company|are you (a |an )?(robot|bot|real|human|person|machine|computer|ai))\b"),
@@ -634,20 +636,9 @@ class CallConversation:
                 intents = [only]
                 break
 
-        if "do_not_call" in intents:
-            self.call["outcome"] = "do_not_call"
-            return "I understand. I'll make sure you're not called about this again. Goodbye.", True, "decision"
-        if "callback" in intents:
-            self.call["outcome"] = "callback"
-            return "No problem at all. We'll call you back at a better time. Goodbye.", True, "decision"
-        # Once interested, "no thanks" means "no more questions", not a change of mind.
-        if "not_interested" in intents and self.call.get("outcome") == "interested" and \
-                not re.search(r"\b(not interested|not looking|already|i'?ll pass|not for me|changed my mind)\b", text.lower()):
-            name = self.call["applicant"].get("first_name") or ""
-            return f"Thank you for your time, {name}. Goodbye.".replace(" .", "."), True, "response"
-        if "not_interested" in intents:
-            self.call["outcome"] = "not_interested"
-            return "No problem, thank you for your time. We'll keep you in mind for other roles. Goodbye.", True, "decision"
+        decided = self._decision(text, follow)
+        if decided:
+            return decided
         if "hold" in intents and not question:
             st["silence"] = -1  # one extra quiet turn while they're away
             return "Of course, take your time. I'm still here.", False, "response"
@@ -695,6 +686,75 @@ class CallConversation:
             return self._finish(self._refuse(follow), follow, "off_topic")
         return self._finish("Sorry, I didn't quite get that. " + follow, follow, "response")
 
+    def _decision(self, text: str, follow: str) -> Optional[tuple]:
+        """The applicant's decision (see call_intents): don't call again,
+        not interested, wrong number, voicemail, call back, ... Returns
+        (said, end, kind), or None to carry on with the conversation."""
+        st = self.state
+        interested = self.call.get("outcome") == "interested"
+        asked = chat_language.requested(text)
+        allowed = language_settings.allowed("calls", ai_model=bool(self.think))
+        if asked and asked not in allowed:
+            return (f"I'm sorry, I can only speak {language_settings.names(allowed)} on this call. {follow}",
+                    False, "response")
+        decision = call_intents.detect(text, allow_voicemail=st.get("turns", 0) <= 2)
+        # A plain "no" answers "Would you be interested in this position?"
+        if decision is None and not interested and call_intents.is_bare_no(text):
+            decision = "not_interested"
+        name = self.call["applicant"].get("first_name") or ""
+        bye = f"Thank you for your time, {name}. Goodbye.".replace(" ,", ",").replace(", .", ".")
+        if decision == "do_not_call":
+            self.call["outcome"] = "do_not_call"
+            return ("I completely understand, and I'm sorry for disturbing you. I've added your number to our "
+                    "do-not-call list, so you won't be contacted again. Goodbye."), True, "decision"
+        if decision == "voicemail":
+            self.call["outcome"] = "voicemail"
+            title = _clean(self.job.get("job_title")) or "job"
+            return (f"Hello{' ' + name if name else ''}, this is {self.agent_name} from {self.company}, calling about a "
+                    f"{title} position that matches your experience. We'll try you again later. Goodbye."), True, "decision"
+        if decision == "wrong_number":
+            self.call["outcome"] = "wrong_number"
+            return ("I'm so sorry about that, I must have the wrong details. I'll update our records so you're not "
+                    "called again about this. Have a good day. Goodbye."), True, "decision"
+        if decision == "end_call":
+            if not interested:
+                self.call["outcome"] = "end_call"
+            return "Of course. " + bye, True, "decision"
+        if decision == "abusive":
+            self.call["outcome"] = self.call.get("outcome") or "abusive"
+            return "I'm sorry you feel that way. I'll end the call here. Goodbye.", True, "decision"
+        if decision == "callback":
+            when = call_intents.callback_when(text)
+            if when:
+                self.call["callback_when"] = when
+            if interested:       # keep their yes; the recruiter calls them anyway
+                return "Of course. Our recruiter will be in touch with you soon. Goodbye.", True, "decision"
+            self.call["outcome"] = "callback"
+            return (f"No problem at all. We'll call you back {when}. Goodbye." if when else
+                    "No problem at all. We'll call you back at a better time. Goodbye."), True, "decision"
+        if decision == "not_interested":
+            # Once interested, "no thanks" means "no more questions", not a change of mind.
+            if interested and not re.search(r"\b(not (really |at all )?interested|not looking|already|pass|not for me|"
+                                            r"changed my mind|don'?t want|retired)\b", call_intents.normalize(text)):
+                return bye, True, "response"
+            self.call["outcome"] = "not_interested"
+            return ("No problem at all, thank you for letting me know. I've noted that you're not interested in this "
+                    "role. Have a great day. Goodbye."), True, "decision"
+        if decision == "unsure" and not interested:
+            st["unsure"] = st.get("unsure", 0) + 1
+            if st["unsure"] == 1:
+                return self._finish("That's completely fine, there's no pressure at all. Would it help if I told you a "
+                                    "bit more, like the hours, the pay or the location?", follow, "response")
+            self.call["outcome"] = "undecided"
+            self.call["send_details"] = True
+            return ("No problem. I'll ask our recruiter to send you the details so you can decide in your own time. "
+                    + bye), True, "decision"
+        if decision == "send_details":
+            self.call["send_details"] = True
+            return self._finish("Of course. I'll ask our recruiter to send you the full details. " + follow,
+                                follow, "response")
+        return None
+
     def _finish(self, said: str, follow: str, kind: str) -> tuple:
         # The same answer twice in a row means we probably misheard the
         # question: say so rather than repeating ourselves.
@@ -720,8 +780,17 @@ async def dial(call_id: str) -> dict:
     call = get_call(call_id)
     if not call:
         raise telephony.TelephonyError("Call not found")
+    if dnc.contains(call["applicant"]["phone"]):
+        logger.info(f"Outbound call {call_id}: {call['applicant']['phone']} is on the Do Not Call list, not dialled")
+        return await update_call(call_id, status="dnc", outcome="do_not_call", dial_requested=False)
+    blocked = call_rules.check(call["applicant"]["phone"])
+    if blocked:                 # Call Rules: wait (hang-up, not interested, daily limit)
+        until, why = blocked
+        logger.info(f"Outbound call {call_id}: {why}")
+        return await update_call(call_id, status="queued", next_attempt_at=until.isoformat(), held_reason=why)
+    call_rules.note_call(call["applicant"]["phone"])
     await update_call(call_id, status="dialing", attempts=call["attempts"] + 1, dial_requested=False, error=None,
-                      last_attempt_at=_now())
+                      last_attempt_at=_now(), scheduled_callback=False, held_reason=None)
     try:
         provider_id = await telephony.place_call(settings, call["applicant"]["phone"], call_id)
         return await update_call(call_id, provider_call_id=provider_id)
@@ -743,7 +812,9 @@ async def dialer_pass() -> None:
         return
     now = datetime.now(timezone.utc)
     auto_ok = settings.get("call_mode") == "auto" and telephony.within_calling_hours(settings)
-    due = [c for c in calls if c["status"] == "queued" and _due(c, now) and (c.get("dial_requested") or auto_ok)]
+    in_hours = telephony.within_calling_hours(settings)
+    due = [c for c in calls if c["status"] == "queued" and _due(c, now)
+           and (c.get("dial_requested") or auto_ok or (c.get("scheduled_callback") and in_hours))]
     due.sort(key=lambda c: (not c.get("dial_requested"), c.get("created_at", "")))
     for c in due[:room]:
         await dial(c["id"])
@@ -773,15 +844,59 @@ async def finish_call(call_id: str, status: str) -> None:
     if not call:
         return
     changes = {"status": status, "ended_at": _now()}
+    outcome = call.get("outcome")
+    if status == "completed" and outcome == "voicemail":
+        status = "no_answer"            # an answering machine: try again later, like no answer
+        changes.update(status=status, last_result="voicemail")
+    elif status == "completed" and outcome in call_intents.STATUS_FOR:
+        changes["status"] = call_intents.STATUS_FOR[outcome]
+    if outcome == "do_not_call":
+        await _mark_do_not_call(call)
+    rules = call_rules.get()
+    phone = call["applicant"]["phone"]
+    name = " ".join(x for x in (call["applicant"].get("first_name"), call["applicant"].get("last_name")) if x)
+    call_rules.after_call(phone, changes["status"], call_id, name, call.get("outcome_said") or "")
     if status in ("no_answer", "busy") and call["attempts"] < int(settings.get("max_attempts") or 1):
+        voicemail = changes.get("last_result") == "voicemail"
+        wait = rules["voicemail_retry_minutes"] if voicemail else int(settings.get("retry_minutes") or 60)
         changes["status"] = "queued"
-        changes["next_attempt_at"] = (datetime.now(timezone.utc) + timedelta(minutes=int(settings.get("retry_minutes") or 60))).isoformat()
-        changes["last_result"] = status
+        changes["next_attempt_at"] = (datetime.now(timezone.utc) + timedelta(minutes=wait)).isoformat()
+        changes["last_result"] = "voicemail" if voicemail else status
+    # They asked to be called back: queue it for the time they said.
+    if (changes["status"] == "callback" and rules["callback_enabled"]
+            and int(call.get("callbacks") or 0) < rules["callback_max"]):
+        at = call_rules.callback_at(call.get("callback_when") or "")
+        changes.update(status="queued", next_attempt_at=at.isoformat(), scheduled_callback=True,
+                       callbacks=int(call.get("callbacks") or 0) + 1, last_result="callback")
+        logger.info(f"Outbound call {call_id}: calling back at {at.isoformat()} "
+                    f"(they said {call.get('callback_when') or 'nothing specific'})")
     if status == "completed" and not call.get("outcome"):
         changes["outcome"] = "no_response" if not call.get("transcript") else "unknown"
     call = await update_call(call_id, **changes)
     if call and call["status"] in _FINAL:
         await send_result(call)
+
+
+async def _mark_do_not_call(call: dict) -> None:
+    """Put the number on the Do Not Call list and stop every other queued
+    job call to it."""
+    phone = call["applicant"]["phone"]
+    said = next((n.get("applicant", "") for n in reversed(call.get("notes") or []) if n.get("kind") == "decision"), "")
+    name = f"{call['applicant'].get('first_name', '')} {call['applicant'].get('last_name', '')}".strip()
+    try:
+        await asyncio.to_thread(dnc.add, phone, "job call", said, call["id"], name)
+    except Exception as e:
+        logger.warning(f"Could not add {phone} to the Do Not Call list: {e}")
+    async with _lock:
+        calls = _load()
+        stopped = 0
+        for c in calls:
+            if c["id"] != call["id"] and c["status"] == "queued" and dnc.key(c["applicant"]["phone"]) == dnc.key(phone):
+                c.update(status="dnc", outcome="do_not_call", updated_at=_now(), next_attempt_at=None)
+                stopped += 1
+        if stopped:
+            _save(calls)
+            logger.info(f"Do Not Call: {stopped} other queued call(s) to {phone} stopped")
 
 
 _NOTE_LABEL = {"question": "Asked", "unanswered": "Asked (for the recruiter to answer)",

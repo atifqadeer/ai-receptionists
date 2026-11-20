@@ -17,10 +17,8 @@ from app.core import instance_lock
 from app.core.security import ALLOWED_ORIGINS, LocalOnlyMiddleware
 from app.api.routes import (
     agent_router,
-    automation_router,
     calls_router,
     analytics_router,
-    settings_router,
     webhooks_router,
     websocket_router
 )
@@ -29,6 +27,13 @@ from app.services.call_manager import CallManager
 from app.services import outbound
 from app.services.inbound import inbound_line
 from app.api.outbound_routes import telephony_router, outbound_router, voice_router, make_conversation
+from app.api.voice_routes import voice_engine_router, store_router
+from app.api.chat_routes import chats_router
+from app.api.language_routes import languages_router
+from app.api.ai_model_routes import ai_model_router
+from app.api.call_rules_routes import call_rules_router
+from app.api.widget_routes import widget_public_router, widget_admin_router, WidgetCorsMiddleware
+from app.core import store
 from app.services.sip_dialer import sip_phone, preload_speech
 
 
@@ -92,18 +97,26 @@ app.add_middleware(
 )
 # Added last so it runs first: the dashboard API answers only this computer
 app.add_middleware(LocalOnlyMiddleware)
+# Outermost: the website chat widget (/widget/...) is called from other websites
+app.add_middleware(WidgetCorsMiddleware)
 
 # Include API routes
 app.include_router(agent_router, prefix="/api/agent", tags=["Agent"])
-app.include_router(automation_router, prefix="/api/automation", tags=["Automation"])
 app.include_router(calls_router, prefix="/api/calls", tags=["Calls"])
 app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"])
-app.include_router(settings_router, prefix="/api/settings", tags=["Settings"])
 app.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
 app.include_router(websocket_router, prefix="/ws", tags=["WebSocket"])
 app.include_router(telephony_router, prefix="/api/telephony", tags=["Telephony"])
 app.include_router(outbound_router, prefix="/api/outbound", tags=["Outbound Calls"])
 app.include_router(voice_router, prefix="/webhooks/voice", tags=["Voice Webhooks"])
+app.include_router(voice_engine_router, prefix="/api/voice", tags=["Live Voice"])
+app.include_router(store_router, prefix="/api/store", tags=["Settings Store"])
+app.include_router(chats_router, prefix="/api/chats", tags=["Text Simulator Chats"])
+app.include_router(languages_router, prefix="/api/languages", tags=["Languages"])
+app.include_router(ai_model_router, prefix="/api/ai-model", tags=["AI Model"])
+app.include_router(call_rules_router, prefix="/api/call-rules", tags=["Call Rules"])
+app.include_router(widget_admin_router, prefix="/api/widget", tags=["Website Chat"])
+app.include_router(widget_public_router, prefix="/widget", tags=["Website Chat Widget (public)"])
 
 
 @app.get("/")
@@ -120,9 +133,10 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Detailed health check"""
+    db = await asyncio.to_thread(store.status)
     return {
-        "status": "healthy",
-        "database": "connected",
+        "status": "healthy" if db["ok"] else "degraded",
+        "database": "connected" if db["ok"] else f"error: {db.get('error')}",
         "ai_agent": "ready",
         "telephony": "configured"
     }

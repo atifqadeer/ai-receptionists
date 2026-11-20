@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import VoicePreview from './VoicePreview';
+import LiveVoiceSettings from './LiveVoiceSettings';
 import VoipSettings, { VoipSection } from './VoipSettings';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
@@ -70,7 +70,8 @@ export default function SetupForm({ section }: { section?: string } = {}) {
     { id: 'provider', label: 'SIP / VoIP Account', icon: 'fa-server', voip: true },
     { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset', voip: true },
     { id: 'rules', label: 'Outbound Calling', icon: 'fa-clock', voip: true },
-    { id: 'voice', label: 'Call Voice & CRM', icon: 'fa-microphone-lines', voip: true },
+    { id: 'voice', label: 'Call Voice', icon: 'fa-microphone-lines', voip: true },
+    { id: 'webhooks', label: 'Webhooks', icon: 'fa-link', voip: true },
   ];
   const isVoip = !!tabs.find((t) => t.id === activeTab)?.voip;
 
@@ -114,7 +115,7 @@ export default function SetupForm({ section }: { section?: string } = {}) {
 
       {/* Identity Tab */}
       {activeTab === 'identity' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-5">
             <h3 className="text-lg font-semibold text-white flex items-center gap-2">
               <i className="fa-solid fa-id-badge text-violet-400"></i>
@@ -156,63 +157,8 @@ export default function SetupForm({ section }: { section?: string } = {}) {
             </div>
           </div>
 
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-5">
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <i className="fa-solid fa-microphone text-violet-400"></i>
-              Voice Settings
-              {(identity.speakingRate !== 1 || identity.pitch !== 1) && (
-                <button type="button" onClick={() => setIdentity({ ...identity, speakingRate: 1, pitch: 1 })}
-                  className="ml-auto text-xs font-normal px-3 py-1 rounded-lg border border-gray-700 text-gray-300 hover:text-white hover:border-violet-500">
-                  <i className="fa-solid fa-rotate-left mr-1.5"></i>Reset voice
-                </button>
-              )}
-            </h3>
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
-                Speaking Rate: {identity.speakingRate}x
-              </label>
-              <input
-                type="range"
-                min="0.5"
-                max="1.5"
-                step="0.05"
-                value={identity.speakingRate}
-                onChange={(e) => setIdentity({ ...identity, speakingRate: parseFloat(e.target.value) })}
-                className="w-full accent-violet-500"
-              />
-              <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>Slow</span>
-                <span>Normal</span>
-                <span>Fast</span>
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
-                Pitch: {identity.pitch}x
-              </label>
-              <input
-                type="range"
-                min="0.5"
-                max="1.5"
-                step="0.05"
-                value={identity.pitch}
-                onChange={(e) => setIdentity({ ...identity, pitch: parseFloat(e.target.value) })}
-                className="w-full accent-violet-500"
-              />
-              <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>Low</span>
-                <span>Normal</span>
-                <span>High</span>
-              </div>
-            </div>
-            
-            {/* Voice Preview Component */}
-            <VoicePreview 
-              selectedVoice={identity.voice}
-              speakingRate={identity.speakingRate}
-              pitch={identity.pitch}
-              onSelectVoice={(voiceId) => setIdentity({ ...identity, voice: voiceId })}
-            />
+          <div className="lg:col-span-2">
+            <LiveVoiceSettings agentName={identity.agentName} companyName={identity.companyName} />
           </div>
         </div>
       )}

@@ -66,8 +66,12 @@ export interface InboundCall {
   caller_number: string;
   caller_name: string;
   extension: string;
-  status: 'dialing' | 'ringing' | 'in_progress' | 'completed' | 'failed' | 'no_answer' | 'cancelled';
+  // also dnc / not_interested / wrong_number / callback / voicemail (see utils/callStatus.ts)
+  status: string;
   direction?: 'inbound' | 'outbound';
+  outcome?: string;
+  outcome_said?: string;
+  callback_when?: string;
   reason?: string;
   started_at: string;
   answered_at: string | null;
@@ -115,6 +119,8 @@ export interface OutboundCall {
   job: Record<string, string>;
   status: string;
   outcome: string | null;
+  callback_when?: string;
+  send_details?: boolean;
   attempts: number;
   next_attempt_at: string | null;
   error: string | null;
@@ -186,6 +192,21 @@ export interface CrmPull {
   rejected?: Array<{ row: number; reason: string; name: string }>;
   error?: string;
 }
+
+export interface DncEntry {
+  number: string;
+  name: string;
+  added_at: string;
+  source: string;
+  said: string;
+  call_id: string;
+}
+
+export const dncApi = {
+  list: () => call<{ numbers: DncEntry[] }>('/api/outbound/dnc'),
+  add: (number: string, name = '') => call<DncEntry>('/api/outbound/dnc', { method: 'POST', body: JSON.stringify({ number, name }) }),
+  remove: (number: string) => call(`/api/outbound/dnc/${encodeURIComponent(number)}`, { method: 'DELETE' }),
+};
 
 export const outboundApi = {
   crmPull: () => call<CrmPull>('/api/outbound/crm/pull', { method: 'POST' }),

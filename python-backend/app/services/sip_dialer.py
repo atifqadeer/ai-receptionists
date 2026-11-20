@@ -6,9 +6,13 @@ SIP account, exactly like a softphone such as MicroSIP, and places job
 calls itself:
 
 - SIP signalling and G.711 audio: pyVoIP (UDP only, GPL-3.0)
-- the agent's voice: Windows' built-in speech (System.Speech), 8 kHz
-- the applicant's words: Vosk offline speech recognition
-  (model in python-backend/models/vosk-model-small-en-us-0.15)
+- the agent's voice: live from Deepgram Aura or Cartesia Sonic, streamed
+  as 8 kHz u-law while it plays (app/services/voice.py); Windows' built-in
+  speech (System.Speech) when no provider is set up or it fails
+- the applicant's words: Vosk offline speech recognition finds when they
+  talk and when they stop (model in python-backend/models/vosk-model-small-en-us-0.15);
+  Deepgram Nova / Cartesia Ink (or Whisper on this PC) writes down what
+  they said
 
 No public URL or cloud account is needed: everything runs on this PC and
 talks to the PBX directly. Each call runs in its own thread and reports
@@ -32,6 +36,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from loguru import logger
+
+from app.services import voice as voice_engine
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 # Speech models, best first: the first one found in models/ is used. The
@@ -59,6 +65,9 @@ def model_dir() -> Path:
 
 MODEL_DIR = model_dir()
 RING_TIMEOUT = 45          # seconds to wait for an answer
+CLOUD_STT_BUDGET = 1.2     # seconds cloud speech-to-text may take before Whisper on this PC is used
+CLOUD_STT_MAX = 4.0        # ...when there is no local Whisper to fall back on
+CLOUD_STT_SLOW = 2         # slow cloud answers in one call before it switches to local for good
 LISTEN_START_TIMEOUT = 8   # seconds of silence before "didn't catch that"
 LISTEN_MAX = 20            # longest single answer, seconds
 END_OF_SPEECH = 1.0        # silence that ends an answer, seconds
@@ -119,24 +128,29 @@ _tts_cache: dict = {}
 _tts_lock = threading.Lock()
 
 
-# The agent's voice in Agent Setup (Identity & Voice) and its gender. The
-# phone voice follows it, so "Daniel" isn't read out by a female voice.
-_AGENT_VOICE_GENDER = {"skylar": "Female", "gemma": "Female", "jacqueline": "Female",
-                       "daniel": "Male", "parker": "Male", "archie": "Male"}
-_AGENT_CONFIG = Path(__file__).resolve().parents[2] / "data" / "agent_config.json"
-_gender_cache: dict = {}
+# The Windows fallback voice follows the gender of the live voice chosen in
+# Settings > Agent > Identity & Voice, so a male agent isn't read out by a
+# female voice when the provider is unreachable.
+_gender_cache: dict = {"at": 0.0, "gender": ""}
 
 
 def agent_voice_gender() -> str:
-    """"Male" / "Female" for the agent's Agent Setup voice, "" if unknown."""
-    try:
-        mtime = _AGENT_CONFIG.stat().st_mtime
-        if _gender_cache.get("mtime") != mtime:
-            voice = (json.loads(_AGENT_CONFIG.read_text(encoding="utf-8")).get("voice") or "").lower()
-            _gender_cache.update(mtime=mtime, gender=_AGENT_VOICE_GENDER.get(voice, ""))
+    """"Male" / "Female" for the agent's chosen live voice, "" if unknown."""
+    if time.time() - _gender_cache["at"] < 10:
         return _gender_cache["gender"]
-    except (OSError, ValueError):
-        return ""
+    gender = ""
+    try:
+        s = voice_engine.get_settings()
+        if s["tts_provider"] == "cartesia":
+            name = (s["cartesia"].get("voice_gender") or "").lower()
+        else:
+            vid = s["deepgram"].get("tts_voice")
+            name = next((g for i, _, g, _, _ in voice_engine.DEEPGRAM_VOICES if i == vid), "")
+        gender = {"female": "Female", "male": "Male"}.get(name, "")
+    except Exception:
+        pass
+    _gender_cache.update(at=time.time(), gender=gender)
+    return gender
 
 
 def synthesize(text: str, language: str = "en-GB", voice: str = "") -> bytes:
@@ -164,6 +178,85 @@ def synthesize(text: str, language: str = "en-GB", voice: str = "") -> bytes:
             _tts_cache.clear()
         _tts_cache[key] = audio
     return audio
+
+
+class Speech:
+    """The agent's next sentence as 8 kHz u-law, filled in by a background
+    thread while it is generated, so the call plays the first words as soon
+    as the provider sends them. Falls back to the Windows voice when the
+    live voice fails before sending any audio."""
+
+    CACHE_MAX = 300           # sentences up to this long are cached
+
+    def __init__(self, text: str, language: str, windows_voice: str):
+        self.text, self.language, self.windows_voice = text, language, windows_voice
+        self.buf = bytearray()
+        self.lock = threading.Lock()
+        self.first = threading.Event()   # some audio is ready (or there will be none)
+        self.done = threading.Event()
+        self.cancelled = False
+        self.engine = voice_engine.active_tts()
+        self.error = ""
+        self.started = time.time()
+        self.first_seconds: Optional[float] = None
+        s = voice_engine.get_settings()
+        self.key = (self.engine, s["deepgram"].get("tts_voice") if self.engine == "deepgram" else
+                    (s["cartesia"].get("voice_id"), s["cartesia"].get("tts_model"), s["cartesia"].get("speed")),
+                    text)
+        with _tts_lock:
+            cached = _tts_cache.get(self.key) if self.engine != "windows" else None
+        if cached is not None:
+            self._add(cached)
+            self.first_seconds = 0.0
+            self._finish()
+        else:
+            threading.Thread(target=self._run, daemon=True, name="tts").start()
+
+    def _add(self, part: bytes) -> None:
+        with self.lock:
+            self.buf += part
+        if self.first_seconds is None:
+            self.first_seconds = round(time.time() - self.started, 2)
+        self.first.set()
+
+    def _finish(self) -> None:
+        self.first.set()
+        self.done.set()
+
+    def _run(self) -> None:
+        try:
+            if self.engine != "windows":
+                try:
+                    for part in voice_engine.stream_speech(self.text, "mulaw"):
+                        if self.cancelled:
+                            return
+                        self._add(part)
+                    if len(self.text) <= self.CACHE_MAX and not self.cancelled:
+                        with _tts_lock:
+                            if len(_tts_cache) > 200:
+                                _tts_cache.clear()
+                            _tts_cache[self.key] = bytes(self.buf)
+                    return
+                except Exception as e:
+                    self.error = f"{self.engine}: {e}"
+                    if self.buf:          # cut off mid-sentence: play what arrived
+                        logger.warning(f"Live voice stopped mid-sentence ({e})")
+                        return
+                    logger.warning(f"Live voice unavailable ({e}); using the Windows voice")
+                    self.engine = "windows"
+            self._add(synthesize(self.text, self.language, self.windows_voice))
+        except Exception as e:
+            self.error = str(e)
+            logger.error(f"Text-to-speech failed: {e}")
+        finally:
+            self._finish()
+
+    def audio(self) -> bytes:
+        with self.lock:
+            return bytes(self.buf)
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 # ---- the applicant's words (Vosk) ----
@@ -857,6 +950,8 @@ class SipCallSession(threading.Thread):
         self.unclear = False      # the last reply heard was mostly guessed words
         self.whisper_hint = ""     # the job, so Whisper expects its words
         self.whisper_prompt = WHISPER_PROMPT
+        self.cloud_slow = 0        # cloud speech-to-text answers that missed their time budget
+        self.ending = False        # the agent is saying goodbye (so the call isn't "hung up" by them)
 
     # Run a coroutine of the call store on the main loop and wait for it.
     def _store(self, coro):
@@ -910,29 +1005,34 @@ class SipCallSession(threading.Thread):
         over the agent, the agent stops and this returns the recogniser
         holding their words so far (listen() carries on with it); otherwise
         returns None once the agent has finished."""
-        t = time.time()
-        audio = synthesize(text, self.settings.get("language") or "en-GB", self.settings.get("voice") or "")
+        speech = Speech(text, self.settings.get("language") or "en-GB", self.settings.get("voice") or "")
+        speech.first.wait(timeout=20)
         if not self._answered():
+            speech.cancel()
             return None
-        duration = len(audio) / 8000.0
-        self.audit.event("agent_speaks", text=text, seconds=round(duration, 1),
-                         synth_seconds=round(time.time() - t, 2), interruptible=interruptible,
-                         listen_lag=round(time.time() - self.clock, 2))
+        self.audit.event("agent_speaks", text=text, engine=speech.engine, first_audio_seconds=speech.first_seconds,
+                         interruptible=interruptible, listen_lag=round(time.time() - self.clock, 2))
         rec = new_recognizer()
         resample, heard, loud, peak, ignored, confs = None, "", 0, 0, "", []
         recent = deque(maxlen=150)  # the last 3 s from the line: the start of an interruption
         need_loud = int(BARGE_IN_LOUD * 8000 / FRAME)
         start = time.time()
+        line_end = start            # when the audio queued on the line finishes playing
         pos = 0
         while self._answered():
-            elapsed = time.time() - start
-            # Feed the line a little ahead, so stopping is quick.
-            while pos < len(audio) and pos / 8000.0 < elapsed + PLAY_AHEAD:
+            now = time.time()
+            elapsed = now - start
+            # Feed the line a little ahead, so stopping is quick. The audio
+            # may still be arriving from the provider.
+            audio = speech.audio()
+            while pos < len(audio) and line_end < now + PLAY_AHEAD:
                 chunk = audio[pos:pos + FRAME * 5]
                 self._write(chunk)
                 pos += len(chunk)
-            if pos >= len(audio) and elapsed > duration + 0.2:
-                self.audit.event("agent_done", peak_line_rms=peak)
+                line_end = max(line_end, now) + len(chunk) / 8000.0
+            if speech.done.is_set() and pos >= len(speech.audio()) and now > line_end + 0.2:
+                self.audit.event("agent_done", peak_line_rms=peak, engine=speech.engine,
+                                 seconds=round(pos / 8000.0, 1), error=speech.error or None)
                 return None
             pcm16 = self._frame_in()
             recent.append(pcm16)
@@ -951,14 +1051,65 @@ class SipCallSession(threading.Thread):
                     self.audit.event("talk_ignored", heard=current, rms=rms,
                                      reason="not enough words yet, or the agent's own words (echo)")
                 if loud >= need_loud and is_barge_in(current, text):
+                    speech.cancel()
                     logger.info(f"SIP call {self.call_id}: applicant interrupted: {current!r}")
                     self.audit.event("barge_in", heard=current, rms=rms, after_seconds=round(elapsed, 2),
-                                     agent_said_seconds=round(min(elapsed, duration), 2), of_seconds=round(duration, 1))
+                                     agent_said_seconds=round(min(elapsed, pos / 8000.0), 2),
+                                     of_seconds=round(len(speech.audio()) / 8000.0, 1))
                     return {"rec": rec, "resample": resample, "heard": heard, "confs": confs,
                             "audio": b"".join(recent)}
                 if not loud and heard and not is_barge_in(heard, text):
                     heard, confs = "", []  # noise or echo: forget it
+        speech.cancel()
         return None
+
+    def _transcribe(self, clip: bytes) -> tuple:
+        """(cloud result, Whisper result) for the caller's answer; one of
+        them is None. The cloud service (Deepgram / Cartesia) gets
+        CLOUD_STT_BUDGET seconds, while Whisper on this PC writes the same
+        answer down at the same time, so the caller is never kept waiting.
+        When the cloud is slower, Whisper's text is used, and after
+        CLOUD_STT_SLOW slow answers the call stops using the cloud service
+        altogether (on a slow internet line it took 5-19 s per sentence)."""
+        if self.cloud_slow >= CLOUD_STT_SLOW or voice_engine.active_stt() == "local":
+            return None, whisper_transcribe(clip, self.whisper_hint, self.whisper_prompt)
+        box: dict = {}
+        done, local_done = threading.Event(), threading.Event()
+
+        def run():
+            try:
+                box["result"] = voice_engine.transcribe(clip, self.whisper_hint)
+            finally:
+                done.set()
+
+        def run_local():
+            try:
+                box["whisper"] = whisper_transcribe(clip, self.whisper_hint, self.whisper_prompt)
+            except Exception as e:
+                logger.warning(f"Whisper failed: {e}")
+            finally:
+                local_done.set()
+
+        threading.Thread(target=run, daemon=True, name="cloud-stt").start()
+        threading.Thread(target=run_local, daemon=True, name="local-stt").start()
+        if done.wait(CLOUD_STT_BUDGET) and box.get("result") is not None:
+            self.cloud_slow = 0
+            return box["result"], None
+        local_done.wait(30)
+        whisper = box.get("whisper")
+        if whisper is None and not done.is_set():   # no local Whisper: give the cloud a little longer
+            done.wait(max(0.0, CLOUD_STT_MAX - CLOUD_STT_BUDGET))
+        if done.is_set() and box.get("result") is None:
+            return None, whisper                     # the cloud failed (not slow): nothing to count
+        if done.is_set() and box.get("result") is not None:
+            return box["result"], None
+        self.cloud_slow += 1
+        self.audit.event("cloud_stt_slow", budget_seconds=CLOUD_STT_BUDGET, slow_answers=self.cloud_slow,
+                         switched_to_local=self.cloud_slow >= CLOUD_STT_SLOW)
+        if self.cloud_slow == CLOUD_STT_SLOW:
+            logger.warning(f"Call {self.call_id[:8]}: cloud speech-to-text is too slow on this connection; "
+                           "using Whisper on this PC for the rest of the call")
+        return None, whisper
 
     def listen(self, barge: Optional[dict] = None) -> str:
         """The applicant's answer. `barge`: they started talking over the
@@ -1000,19 +1151,25 @@ class SipCallSession(threading.Thread):
                     or (heard and now - last_voice > END_OF_SPEECH):
                 break
         vosk_text = (said + " " + take_result(rec.FinalResult(), confs)).strip()
-        result, self.unclear, whisper = vosk_text, bool(vosk_text) and is_unclear(confs), None
+        result, self.unclear, whisper, cloud = vosk_text, bool(vosk_text) and is_unclear(confs), None, None
         if heard and voice_from is not None and self._answered():
             # Up to 0.3 s after the last voice: trailing silence makes Whisper invent words ("you").
-            whisper = whisper_transcribe(trim_silence(bytes(audio[voice_from:voice_to + int(0.3 * 8000) * 2])),
-                                         self.whisper_hint, self.whisper_prompt)
-        if whisper is not None:
+            clip = trim_silence(bytes(audio[voice_from:voice_to + int(0.3 * 8000) * 2]))
+            cloud, whisper = self._transcribe(clip)
+        if cloud is not None:
+            text = re.sub(r"\s+", " ", cloud["text"]).strip()
+            if not re.search(r"[a-z]", text.lower()):
+                result, self.unclear = ("", False) if not vosk_text else (vosk_text, True)
+            else:
+                result, self.unclear = text, cloud["confidence"] < voice_engine.UNSURE
+        elif whisper is not None:
             text = re.sub(r"\s+", " ", whisper["text"]).strip()
             nothing = whisper["no_speech"] > WHISPER_SILENCE and whisper["logprob"] < WHISPER_UNSURE
             if nothing or not re.search(r"[a-z]", text.lower()):
                 result, self.unclear = ("", False) if not vosk_text else (vosk_text, True)
             else:
                 result, self.unclear = text, whisper["logprob"] < WHISPER_UNSURE
-        self.audit.event("heard", text=result, vosk=vosk_text, whisper=whisper,
+        self.audit.event("heard", text=result, vosk=vosk_text, whisper=whisper, cloud=cloud,
                          seconds=round(self.clock - start, 1), confidence=[round(c, 2) for c in confs],
                          unclear=self.unclear, listen_lag=round(time.time() - self.clock, 2))
         return result
@@ -1053,6 +1210,8 @@ class SipCallSession(threading.Thread):
 
             def turn(text: str, end: bool):
                 """Say `text`; the applicant may talk over it (not over a goodbye)."""
+                if end:
+                    self.ending = True
                 transcript.append({"role": "agent", "text": text})
                 save()
                 barge = self.say(text, interruptible=not end)
@@ -1090,6 +1249,9 @@ class SipCallSession(threading.Thread):
                     break
             save()
             final = "completed"
+            if not self.ending and not self._answered():
+                final = "hung_up"          # the applicant put the phone down mid-conversation
+                self.audit.event("hung_up", by="applicant")
         except Exception as e:
             logger.warning(f"SIP call {self.call_id} failed: {e}")
             self.audit.event("error", error=str(e))

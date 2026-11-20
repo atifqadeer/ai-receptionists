@@ -22,9 +22,9 @@ class Settings(BaseSettings):
     APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
     APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "dev-secret-key-change-in-production")
     
-    # Database (must be the async aiosqlite form — the old sync default
-    # made create_async_engine raise on startup when no .env was present)
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/ai_receptionist.db")
+    # Database: MySQL / MariaDB (XAMPP works). The database is created on
+    # start-up if it doesn't exist.
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql+pymysql://root:@127.0.0.1:3306/ai_receptionist?charset=utf8mb4")
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     
     # Deepgram STT
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
+    CARTESIA_API_KEY: str = os.getenv("CARTESIA_API_KEY", "")
     
     # Twilio
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")

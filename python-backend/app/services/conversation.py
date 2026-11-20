@@ -10,13 +10,18 @@ conversation instead of independent keyword lookups:
 - the role's "Candidate Screening Questions" are asked one at a time and
   the caller's answers are kept with the call;
 - "yes", "tell me more" and "what else" continue from the last answer;
-- the agent never sends the same reply twice in a row.
+- the agent never sends the same reply twice in a row;
+- it answers in the visitor's language (English, Urdu, Roman Urdu), follows
+  "chat in Urdu"-style requests, and handles small talk, gibberish and
+  off-topic questions by steering back to the company's hiring campaign,
+  with varied wording instead of one fixed fallback (chat_language.py).
 """
 
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.services import chat_language as lang
 from app.services.knowledge import KnowledgeBase, key_words
 
 _QUESTION_START = {
@@ -24,10 +29,30 @@ _QUESTION_START = {
     "who", "where", "when", "why", "will", "would", "should", "tell", "explain",
     "any", "may", "have", "has",
 }
-_YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "alright", "definitely", "absolutely", "go", "ahead", "start", "proceed"}
-_NO = {"no", "nope", "nah", "not", "later", "stop", "cancel"}
+_YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "alright", "definitely", "absolutely", "go", "ahead", "start", "proceed",
+        # Roman Urdu / Urdu
+        "haan", "han", "hanji", "ji", "jee", "bilkul", "zaroor", "zarur", "theek", "thik", "acha", "achha", "accha", "kar", "karo", "karein",
+        "جی", "ہاں", "بالکل", "ضرور", "ٹھیک"}
+_NO = {"no", "nope", "nah", "not", "later", "stop", "cancel",
+       "nahi", "nahin", "nai", "nhi", "mat", "rehne", "نہیں", "نہی"}
 _MORE = re.compile(r"\b(tell me more|more (info|information|details)|go on|what else|anything else|continue|carry on)\b", re.I)
-_NEXT_STEP = re.compile(r"\b(next step|what (should|do|can) i do( now| next)?|how (do|can|should) i (start|proceed|go ahead)|what now|help me)\b", re.I)
+_NEXT_STEP = re.compile(r"\b(next step|what (should|do|can) i do( now| next)?|how (do|can|should) i (start|proceed|go ahead)|what now|"
+                        r"help me (apply|get started|with (the|my) application))\b", re.I)
+# A question about pay must be answered with pay; the nearest passage
+# ("Candidate Information Required: ...") isn't an answer.
+_ASPECTS = {
+    "pay": (re.compile(r"\b(salary|salaries|pay|paid|wage|wages|rate|earn|money|package|compensation|how much)\b", re.I),
+            re.compile(r"\b(salary|salaries|pay|paid|wage|wages|per (hour|annum|year|month|week))\b|[£$€]\s?\d|"
+                       r"\b\d[\d,.]*\s?(k|pounds|gbp|pkr|rs|rupees)\b", re.I)),
+}
+# A question about a detail of the job (for "our recruiter will confirm
+# that for the X role"); anything else gets the general fallback.
+_JOB_DETAIL = re.compile(r"\b(salary|pay|wage|hours|shift|shifts|location|where|requirement\w*|experience|visa|"
+                         r"sponsor\w*|holiday\w*|leave|start|contract|benefit\w*|training|uniform|interview|"
+                         r"overtime|bonus|pension|accommodation|transport)\b", re.I)
+# The caller telling us about themselves (experience, qualifications).
+_SELF_INFO = re.compile(r"\b(\d+|year|years|experience|experienced|qualified|qualification|certificate|degree|"
+                        r"worked|working|currently|licen[cs]e|registered|nmc|pin)\b", re.I)
 # "I have 5 years experience", "I'm RGN qualified", "my last job was ...":
 # the caller telling us about themselves.
 _ABOUT_ME = re.compile(r"^\s*(i|i'm|im|i've|ive|i am|i have|my)\b", re.I)
@@ -46,10 +71,14 @@ class CallState:
     last_ref: Optional[tuple] = None     # section last answered from (for "tell me more")
     last_reply: str = ""
     fallbacks: int = 0
+    language: str = "english"            # english / urdu / roman_urdu
+    lang_locked: bool = False            # the visitor asked for this language
+    turns: int = 0                       # rotates the wording of repeated situations
 
 
 def _words(text: str) -> list:
-    return re.findall(r"[a-z']+", (text or "").lower())
+    # Latin words, and Urdu-script words (for "جی" / "نہیں").
+    return re.findall(r"[a-z']+|[؀-ۿ]+", (text or "").lower())
 
 
 def is_question(text: str) -> bool:
@@ -59,7 +88,7 @@ def is_question(text: str) -> bool:
 
 def is_yes(text: str) -> bool:
     w = _words(text)
-    return bool(w) and len(w) <= 5 and bool(set(w) & _YES) and not set(w) & {"no", "not"}
+    return bool(w) and len(w) <= 5 and bool(set(w) & _YES) and not set(w) & {"no", "not", "nahi", "nahin", "nhi", "nai"}
 
 
 def is_no(text: str) -> bool:
@@ -72,19 +101,131 @@ class Conversation:
     state. `lookup(message, topic)` is the agent's knowledge lookup and
     returns (answer, intent, ref) or None."""
 
-    def __init__(self, kb: KnowledgeBase, state: CallState, lookup, contact: str = ""):
+    def __init__(self, kb: KnowledgeBase, state: CallState, lookup, contact: str = "",
+                 company: str = "", agent: str = "", farewell: str = "",
+                 allowed: Optional[list] = None, default_lang: str = "english", medium: str = "chat"):
         self.kb = kb
         self.state = state
         self.lookup = lookup
         self.contact = contact
+        self.company = company
+        self.agent = agent
+        self.farewell = farewell
+        self._in_language = False      # the reply was written in the visitor's language
+        self._last_message = ""
+        # Settings > Agent > Languages: the languages this conversation may use.
+        self.allowed = [x for x in (allowed or [lang.ENGLISH, lang.URDU, lang.ROMAN]) if x in lang.SUPPORTED] or [lang.ENGLISH]
+        self.default_lang = default_lang if default_lang in self.allowed else self.allowed[0]
+        self.medium = medium
 
     def reply(self, message: str) -> tuple:
-        text, intent = self._reply(message)
+        st = self.state
+        if st.turns == 0 or st.language not in self.allowed:
+            st.language = self.default_lang
+        st.turns += 1
+        self._in_language = False
+        self._last_message = lang.gloss(message)
+        text, intent = self._language_turn(message) or \
+            self._reply(lang.gloss(message) if st.language != lang.ENGLISH else message)
+        if not self._in_language and st.language != lang.ENGLISH:
+            text = self._in_visitors_language(text) or lang.localize(st.language, text, st.turns)
         # Never the same reply twice in a row.
-        if text == self.state.last_reply:
+        if text == st.last_reply:
             text, intent = self._fallback(repeat=True), "other"
-        self.state.last_reply = text
+        st.last_reply = text
         return text, intent
+
+    # ---- language, small talk, gibberish, off-topic ----
+
+    def _say(self, key: str, **extra) -> str:
+        self._in_language = True
+        return lang.phrase(self.state.language, key, self.state.turns, roles=self.kb.roles(),
+                           company=self.company, agent=self.agent, contact=self.contact, allowed=self.allowed, **extra)
+
+    def _language_turn(self, message: str) -> Optional[tuple]:
+        """A reply that doesn't come from the knowledge base: a language
+        change, a greeting, thanks, gibberish or an off-topic question.
+        Also notes the language the visitor is writing in."""
+        st = self.state
+        asked = lang.requested(message)
+        if asked and asked in self.allowed:
+            st.language, st.lang_locked = asked, True
+            return self._say("switched"), "other"
+        refused = self.guard(message)
+        if refused:
+            return refused
+        written = lang.detect(message)
+        if written in (lang.URDU, lang.ROMAN) and not (st.lang_locked and st.language != lang.ENGLISH):
+            st.language = written
+        elif written == lang.ENGLISH and lang.ENGLISH in self.allowed and st.language != lang.ENGLISH \
+                and not st.lang_locked and len(lang.words(message)) >= 4:
+            st.language = lang.ENGLISH
+        elif written == "other":
+            return self._say(refuse, asked=lang.lang_name(st.language, "that language")), "other"
+        if lang.is_gibberish(message):
+            return self._say("gibberish"), "other"
+        if st.asking:
+            return None                    # a screening answer: handled below
+        w = set(lang.words(message))
+        if re.search(r"\b(salam|salaam|assalam\w*|asalam\w*|aoa)\b", message.lower()) or "السلام" in message:
+            return self._say("greet_salam"), "other"
+        if w & {"bye", "goodbye", "khuda", "hafiz", "allah"} and len(w) <= 5:
+            if st.language == lang.ENGLISH and self.farewell:
+                self._in_language = True
+                return self.farewell, "other"
+            return self._say("thanks"), "other"
+        if w & {"thanks", "thank", "shukriya", "shukria", "cheers"} and len(w) <= 5 and not is_question(message):
+            return self._say("thanks"), "other"
+        if w & {"hello", "hi", "hey", "hiya", "morning", "afternoon", "evening"} and len(w) <= 4 \
+                and not self.kb.find_role(message):
+            return self._say("greet"), "other"
+        if lang.is_off_topic(message) and not self.kb.find_role(message):
+            return self._say("off_topic"), "other"
+        if st.language != lang.ENGLISH and lang.asks_roles(message) and not self.kb.find_role(lang.gloss(message)):
+            st.offered = "role"
+            return self._say("only_pitch"), "general_inquiry"
+        return None
+
+    def guard(self, message: str) -> Optional[tuple]:
+        """Guardrail (Settings > Agent > Languages): a reply when the message
+        asks for, or is written in, a language that isn't selected; None
+        when it's fine. The reply is in an allowed language and lists them."""
+        st = self.state
+        if st.language not in self.allowed:
+            st.language = self.default_lang
+        refuse = "unsupported_call" if self.medium == "call" else "unsupported"
+        asked = lang.requested(message)
+        if asked and asked not in self.allowed:
+            return self._say(refuse, asked=lang.lang_name(st.language, asked)), "other"
+        if asked:
+            return None
+        written = lang.detect(message)
+        if written in (lang.ENGLISH, lang.URDU, lang.ROMAN) and written not in self.allowed \
+                and (written != lang.ENGLISH or len(lang.words(message)) >= 3):
+            return self._say("not_allowed" if self.medium == "chat" else refuse,
+                             asked=lang.lang_name(st.language, written)), "other"
+        if written == "other":
+            return self._say(refuse, asked=lang.lang_name(st.language, "that language")), "other"
+        return None
+
+    # The agent's own fixed lines, said in the visitor's language.
+    _CANNED = [
+        (re.compile(r"^Thank you for sharing that\. Would you like me to take a few details for the (?P<topic>.+) role\?$"), "details_offer"),
+        (re.compile(r"^No problem, I've stopped the questions"), "stopped"),
+        (re.compile(r"^No problem\. Is there anything else I can help you with\?$"), "anything_else"),
+        (re.compile(r"^Great\. What would you like to know\?"), "what_else"),
+        (re.compile(r"^Which role are you interested in\?"), "only_pitch"),
+        (re.compile(r"^Great, I'll ask you a few short questions for the (?P<topic>.+?) role\. (?P<question>.+)$"), "screening_start"),
+        (re.compile(r"^Thank you\. (?P<question>[^.!]+\?)$"), "screening_next"),
+    ]
+
+    def _in_visitors_language(self, text: str) -> Optional[str]:
+        for pat, key in self._CANNED:
+            m = pat.search(text)
+            if m:
+                g = m.groupdict()
+                return self._say(key, topic=g.get("topic") or self.state.topic, question=g.get("question") or "")
+        return None
 
     # ---- turn handling ----
 
@@ -137,8 +278,14 @@ class Conversation:
             # "I'm a nurse", "what about chef", "tell me about the nurse role":
             # introduce the role and offer the next steps. A specific
             # question ("nurse requirements") is answered directly below.
+            if _ABOUT_ME.search(message) and _SELF_INFO.search(message) and not is_question(message) \
+                    and self.kb.screening_questions(role):
+                st.offered = "details"
+                return (f"Thank you for sharing that. Would you like me to take a few details "
+                        f"for the {role} role?"), "general_inquiry"
             aspect = key_words(message) - key_words(role) - {"job", "about", "interested", "looking", "apply", "role", "experienced", "qualified"}
-            if not aspect or not is_question(message) and len(aspect) <= 1:
+            asks_detail = bool(_JOB_DETAIL.search(message) or re.search(r"\b(responsibilit\w*|dut(y|ies)|qualification\w*|skills?)\b", message, re.I))
+            if not aspect or (not is_question(message) and len(aspect) <= 1 and not asks_detail):
                 return self._introduce_role(role)
 
         # "What should I do next?": the next step for this caller.
@@ -165,11 +312,18 @@ class Conversation:
             roles = self.kb.roles()
             if roles:
                 st.offered = "role"
+                if st.language != lang.ENGLISH:
+                    return self._say("only_pitch"), "general_inquiry"
                 return (f"We currently recruit for {self._join(roles)} positions. "
                         "Which role are you interested in?"), "general_inquiry"
 
         # 6) The knowledge base.
         found = self.lookup(message, st.topic)
+        if found:
+            for asks, answers in _ASPECTS.values():
+                if asks.search(message) and not answers.search(found[0]):
+                    found = None          # it doesn't answer what was asked
+                    break
         if found:
             answer, intent, ref = found
             if ref:
@@ -180,7 +334,8 @@ class Conversation:
 
         # 7) A statement about the caller while a role is being discussed
         # ("I have 5 years experience"): offer to take their details.
-        if st.topic and not is_question(message) and self.kb.screening_questions(st.topic):
+        if st.topic and not is_question(message) and self.kb.screening_questions(st.topic) \
+                and (_ABOUT_ME.search(message) or _SELF_INFO.search(message)):
             st.offered = "details"
             return (f"Thank you for sharing that. Would you like me to take a few details "
                     f"for the {st.topic} role?"), "general_inquiry"
@@ -253,11 +408,14 @@ class Conversation:
         return "You can ask me about our services, prices, opening hours or how to get in touch."
 
     def _fallback(self, repeat: bool = False) -> str:
+        """Nothing in the knowledge base answers it: say so in a few words
+        (different each time, in the visitor's language) and bring the
+        conversation back to the roles the company is hiring for."""
         st = self.state
         st.fallbacks += 1
-        contact = f" Our team can also help you at {self.contact}." if self.contact else ""
+        st.turns += 1 if repeat else 0
         if repeat:
-            return "I've shared what I have on that. Could you ask it another way? " + self._suggestions()
-        if st.fallbacks % 2 == 1:
-            return "I'm sorry, I don't have that information in my knowledge base. " + self._suggestions() + contact
-        return "I'm not sure about that one. " + self._suggestions() + " What would you like to know?"
+            return self._say("gibberish")
+        if st.topic and _JOB_DETAIL.search(self._last_message):
+            return self._say("fallback_topic", topic=st.topic)
+        return self._say("fallback")

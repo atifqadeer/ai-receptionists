@@ -2,6 +2,7 @@
 API Routes - All endpoint definitions for the AI Receptionist Hub
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 from xml.sax.saxutils import escape
@@ -100,14 +101,20 @@ async def start_call(request: Request, data: Optional[dict] = None):
         caller_name=data.get("caller_name")
     )
     
-    # Get greeting from agent
+    # Get greeting from agent. A text chat ({"channel": "chat"}, the
+    # dashboard's test chat) uses the chat welcome, not the phone greeting.
     agent = request.app.state.ai_agent
-    greeting = agent.get_config().greeting
+    if data.get("channel") == "chat":
+        agent.chat_sessions.add(call.call_id)
+        greeting = await asyncio.to_thread(agent.chat_welcome)
+    else:
+        greeting = agent.get_config().greeting
     
     return {
         "call_id": call.call_id,
         "status": call.status,
         "greeting": greeting,
+        "goodbye": (await asyncio.to_thread(agent.chat_goodbye)) if data.get("channel") == "chat" else agent.get_config().farewell,
         "started_at": call.started_at.isoformat()
     }
 
@@ -130,82 +137,6 @@ async def end_call(request: Request, call_id: str):
         "role": summary.get("role"),
         "screening_answers": summary.get("screening_answers", {}),
     }
-
-
-# ---- Automation Router ----
-automation_router = APIRouter()
-
-# In-memory automation rules (in production, use database)
-_automation_rules = [
-    AutomationRule(id=1, name="After Hours Routing", trigger="Call outside business hours", action="Play recorded message + offer callback", enabled=True, priority=1),
-    AutomationRule(id=2, name="Appointment Booking", trigger="Intent: Appointment", action="Collect date/time → Confirm → Send SMS", enabled=True, priority=2),
-    AutomationRule(id=3, name="Emergency Escalation", trigger="Keywords: emergency, urgent, help", action="Immediately transfer to on-call staff", enabled=True, priority=0),
-    AutomationRule(id=4, name="VIP Caller Detection", trigger="Caller ID matches VIP list", action="Skip queue → Transfer to manager", enabled=False, priority=1),
-    AutomationRule(id=5, name="Survey Collection", trigger="Call resolved successfully", action="Ask for satisfaction rating 1-5", enabled=True, priority=5),
-    AutomationRule(id=6, name="Voicemail Fallback", trigger="No agent available after 30s", action="Offer voicemail + email notification", enabled=True, priority=4),
-]
-
-_workflows = [
-    Workflow(id=1, name="New Customer Onboarding", steps=5, status="active", calls=234),
-    Workflow(id=2, name="Appointment Reminder", steps=3, status="active", calls=567),
-    Workflow(id=3, name="Payment Collection", steps=4, status="paused", calls=89),
-    Workflow(id=4, name="Feedback Survey", steps=2, status="active", calls=1023),
-]
-
-
-@automation_router.get("/rules")
-async def get_automation_rules():
-    """Get all automation rules"""
-    return sorted(_automation_rules, key=lambda r: r.priority)
-
-
-@automation_router.post("/rules")
-async def create_automation_rule(rule: dict):
-    """Create a new automation rule"""
-    new_rule = AutomationRule(
-        id=len(_automation_rules) + 1,
-        name=rule.get("name", ""),
-        trigger=rule.get("trigger", ""),
-        action=rule.get("action", ""),
-        enabled=True,
-        priority=len(_automation_rules) + 1
-    )
-    _automation_rules.append(new_rule)
-    return new_rule
-
-
-@automation_router.put("/rules/{rule_id}/toggle")
-async def toggle_rule(rule_id: int):
-    """Toggle an automation rule on/off"""
-    for rule in _automation_rules:
-        if rule.id == rule_id:
-            rule.enabled = not rule.enabled
-            return {"status": "success", "rule": rule}
-    raise HTTPException(status_code=404, detail="Rule not found")
-
-
-@automation_router.delete("/rules/{rule_id}")
-async def delete_rule(rule_id: int):
-    """Delete an automation rule"""
-    global _automation_rules
-    _automation_rules = [r for r in _automation_rules if r.id != rule_id]
-    return {"status": "deleted"}
-
-
-@automation_router.get("/workflows")
-async def get_workflows():
-    """Get all workflows"""
-    return _workflows
-
-
-@automation_router.put("/workflows/{wf_id}/toggle")
-async def toggle_workflow(wf_id: int):
-    """Toggle a workflow"""
-    for wf in _workflows:
-        if wf.id == wf_id:
-            wf.status = "paused" if wf.status == "active" else "active"
-            return {"status": "success", "workflow": wf}
-    raise HTTPException(status_code=404, detail="Workflow not found")
 
 
 # ---- Calls Router ----
@@ -296,88 +227,6 @@ async def get_intent_distribution():
         {"name": "Technical Support", "count": 156, "percentage": 13},
         {"name": "Complaints", "count": 89, "percentage": 7},
         {"name": "Other", "count": 80, "percentage": 6},
-    ]
-
-
-# ---- Settings Router ----
-settings_router = APIRouter()
-
-
-@settings_router.get("/general")
-async def get_general_settings():
-    """Get general settings"""
-    return {
-        "system_name": "AI Receptionist Hub",
-        "timezone": "America/New_York",
-        "date_format": "MM/DD/YYYY",
-        "enable_notifications": True,
-        "enable_call_recording": True,
-        "enable_transcripts": True,
-        "auto_save_transcripts": True,
-    }
-
-
-@settings_router.put("/general")
-async def update_general_settings(data: dict):
-    """Update general settings"""
-    return {"status": "success", "settings": data}
-
-
-@settings_router.get("/telephony")
-async def get_telephony_settings():
-    """Get telephony settings"""
-    return {
-        "provider": "twilio",
-        "account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "phone_number": "+1 (555) 123-4567",
-        "max_concurrent_calls": 10,
-        "enable_sip": False,
-    }
-
-
-@settings_router.put("/telephony")
-async def update_telephony_settings(data: dict):
-    """Update telephony settings"""
-    return {"status": "success", "settings": data}
-
-
-@settings_router.get("/ai-model")
-async def get_ai_model_settings():
-    """Get AI model settings"""
-    return {
-        "provider": "openai",
-        "model": "gpt-4-turbo-preview",
-        "temperature": 0.7,
-        "max_tokens": 500,
-        "enable_function_calling": True,
-        "enable_memory": True,
-    }
-
-
-@settings_router.put("/ai-model")
-async def update_ai_model_settings(data: dict):
-    """Update AI model settings"""
-    return {"status": "success", "settings": data}
-
-
-@settings_router.get("/team")
-async def get_team_members():
-    """Get team members"""
-    return [
-        {"id": 1, "name": "Alex Thompson", "role": "Admin", "email": "alex@techcorp.com", "status": "active"},
-        {"id": 2, "name": "Maria Garcia", "role": "Manager", "email": "maria@techcorp.com", "status": "active"},
-        {"id": 3, "name": "James Wilson", "role": "Agent", "email": "james@techcorp.com", "status": "active"},
-        {"id": 4, "name": "Sophie Brown", "role": "Agent", "email": "sophie@techcorp.com", "status": "inactive"},
-    ]
-
-
-@settings_router.get("/api-keys")
-async def get_api_keys():
-    """Get API keys (masked)"""
-    return [
-        {"name": "Production API Key", "key": "pk_live_••••••••••••••••••••", "created": "2024-01-01", "status": "active"},
-        {"name": "Development API Key", "key": "pk_test_••••••••••••••••••••", "created": "2024-01-05", "status": "active"},
-        {"name": "Webhook Secret", "key": "whsec_••••••••••••••••••••", "created": "2024-01-01", "status": "active"},
     ]
 
 

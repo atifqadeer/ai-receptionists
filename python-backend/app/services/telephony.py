@@ -9,7 +9,7 @@ webhooks, so the AI agent can hold a conversation on the call):
 - Telnyx      TeXML API (Twilio-compatible XML)
 - Vonage      Voice API (JWT-signed) + NCCO speech input
 
-Settings (credentials included) are stored in data/telephony.json next to
+Settings (credentials included) are stored in MySQL (document "telephony") next to
 the agent config. Secrets are never returned to the dashboard in full.
 """
 
@@ -21,6 +21,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from app.core import store
 from typing import Optional
 from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
@@ -28,7 +29,6 @@ from zoneinfo import ZoneInfo
 import httpx
 from loguru import logger
 
-_SETTINGS_FILE = Path(__file__).resolve().parents[2] / "data" / "telephony.json"
 
 # Credential fields per provider. "secret" fields are masked when read.
 PROVIDERS = {
@@ -136,8 +136,7 @@ class TelephonyError(Exception):
 def load_settings() -> dict:
     data = {}
     try:
-        if _SETTINGS_FILE.exists():
-            data = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+        data = store.get_doc("telephony") or {}
     except Exception as e:
         logger.warning(f"Could not read telephony settings: {e}")
     settings = {**DEFAULT_SETTINGS, **data}
@@ -148,8 +147,7 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
-    _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    store.put_doc("telephony", settings)
 
 
 def _mask(value: str) -> str:

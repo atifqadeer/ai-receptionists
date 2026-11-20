@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import Dashboard from './components/Dashboard';
-import CallSimulator from './components/CallSimulator';
 import RealCallSimulator from './components/RealCallSimulator';
 import OutboundCalls from './components/OutboundCalls';
 import InboundCalls from './components/InboundCalls';
 import Analytics from './components/Analytics';
 import SettingsHub from './components/SettingsHub';
+import WebsiteChat from './components/WebsiteChat';
+import DncList from './components/DncList';
 import { downloadPythonBackend } from './utils/downloadZip';
 
-type Page = 'dashboard' | 'simulator' | 'realcall' | 'jobcalls' | 'inbound' | 'analytics' | 'settings';
+type Page = 'dashboard' | 'webchat' | 'realcall' | 'jobcalls' | 'dnc' | 'inbound' | 'analytics' | 'settings';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -32,11 +33,12 @@ function App() {
 
   const navItems: { id: Page; label: string; icon: string }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line' },
+    { id: 'analytics', label: 'Analytics', icon: 'fa-chart-bar' },
+    { id: 'webchat', label: 'Chat', icon: 'fa-comments' },
     { id: 'realcall', label: 'Make a Call', icon: 'fa-phone-volume' },
     { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset' },
     { id: 'jobcalls', label: 'Job Calls', icon: 'fa-briefcase' },
-    { id: 'simulator', label: 'Text Simulator', icon: 'fa-comments' },
-    { id: 'analytics', label: 'Analytics', icon: 'fa-chart-bar' },
+    { id: 'dnc', label: 'Do Not Call', icon: 'fa-ban' },
     { id: 'settings', label: 'Settings', icon: 'fa-sliders' },
   ];
 
@@ -45,8 +47,9 @@ function App() {
       case 'dashboard': return <Dashboard />;
       case 'realcall': return <RealCallSimulator />;
       case 'jobcalls': return <OutboundCalls />;
+      case 'dnc': return <DncList />;
       case 'inbound': return <InboundCalls />;
-      case 'simulator': return <CallSimulator />;
+      case 'webchat': return <WebsiteChat />;
       case 'analytics': return <Analytics />;
       case 'settings': return <SettingsHub />;
       default: return <Dashboard />;
@@ -118,18 +121,20 @@ function App() {
         <header className="sticky top-0 z-10 bg-gray-950/80 backdrop-blur-xl border-b border-gray-800 px-6 py-4 flex items-center justify-between">
           <div>
             <h2 className="text-xl font-bold text-white capitalize">
-              {currentPage === 'simulator' ? 'Text Call Simulator' : 
-               currentPage === 'realcall' ? 'Make a Voice Call' : 
+              {currentPage === 'realcall' ? 'Make a Voice Call' :
                currentPage === 'jobcalls' ? 'Job Calls' : 
+               currentPage === 'dnc' ? 'Do Not Call list' : 
                currentPage === 'inbound' ? 'Inbound Calls' : 
+               currentPage === 'webchat' ? 'Chat' : 
                currentPage}
             </h2>
             <p className="text-sm text-gray-400">
               {currentPage === 'dashboard' && 'Overview of your AI receptionist performance'}
               {currentPage === 'realcall' && 'Dial any number for the AI agent to call, or test it in your browser'}
+              {currentPage === 'webchat' && 'Website chat conversations by visitor email, a test chat with your agent, and the widget for your site'}
               {currentPage === 'inbound' && 'Every call the agent answered on your inbound extension: transcripts, recordings and history'}
               {currentPage === 'jobcalls' && 'The AI agent calls applicants about matching jobs from your CRM or a CSV'}
-              {currentPage === 'simulator' && 'Test your AI agent with text-based conversations'}
+              {currentPage === 'dnc' && 'People who asked not to be contacted again: the agent never calls these numbers'}
               {currentPage === 'analytics' && 'View call history and performance metrics'}
               {currentPage === 'settings' && 'Agent, calling, automation and system settings in one place'}
             </p>

@@ -11,6 +11,9 @@ from loguru import logger
 from openai import AsyncOpenAI, OpenAI
 
 from app.core.config import settings
+from app.core import store
+from app.services import language_settings
+from app.services import ai_model
 from app.models.schemas import (
     AgentConfig, CallContext, Message, AgentResponse
 )
@@ -22,7 +25,6 @@ from app.services.conversation import CallState, Conversation
 # single source the agent answers from. It is persisted to disk so the
 # knowledge base set in the dashboard survives restarts — previously it
 # lived only in memory and reset to the hardcoded defaults on restart.
-_CONFIG_FILE = Path(__file__).resolve().parents[2] / "data" / "agent_config.json"
 
 class AIAgent:
     """
@@ -31,19 +33,21 @@ class AIAgent:
     """
     
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.config = self._load_config()
         self.conversation_history: dict[str, list[dict]] = {}
         # Per-call conversation state for knowledge-base answers (role being
         # discussed, screening progress, last reply) - see conversation.py.
         self.call_state: dict[str, CallState] = {}
+        # Text chats (the test chat in the dashboard) started with
+        # channel "chat"; website chats have ids starting "widget-".
+        self.chat_sessions: set = set()
 
     def _load_config(self) -> AgentConfig:
         """Load the persisted config if present, else the defaults."""
         try:
-            if _CONFIG_FILE.exists():
-                data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
-                logger.info(f"Agent config loaded from {_CONFIG_FILE}")
+            data = store.get_doc("agent_config")
+            if data is not None:
+                logger.info("Agent config loaded from MySQL")
                 return AgentConfig.model_validate(data)
         except Exception as e:
             logger.warning(f"Could not load saved agent config ({e}); using defaults")
@@ -52,10 +56,7 @@ class AIAgent:
     def _save_config(self) -> None:
         """Persist the current config (knowledge base included)."""
         try:
-            _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _CONFIG_FILE.write_text(
-                json.dumps(self.config.model_dump(), indent=2), encoding="utf-8"
-            )
+            store.put_doc("agent_config", self.config.model_dump())
         except Exception as e:
             logger.warning(f"Could not save agent config: {e}")
 
@@ -103,7 +104,19 @@ class AIAgent:
             ]
         )
     
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, channel: str = "calls") -> str:
+        """The AI model's instructions, with the language rules for `channel`
+        ("chat" or "calls", Settings > Agent > Languages)."""
+        extra = (ai_model.get().get("instructions") or "").strip()
+        extra = f"\n\nADDITIONAL INSTRUCTIONS FROM THE BUSINESS:\n{extra}" if extra else ""
+        return self._base_system_prompt() + extra + language_settings.prompt_rules(channel)
+
+    @property
+    def client(self):
+        """The AI model client (Settings > System > AI Model)."""
+        return ai_model.client()
+
+    def _base_system_prompt(self) -> str:
         """Build the system prompt for the AI agent"""
         config = self.config
         kb = config.knowledge_base
@@ -137,6 +150,8 @@ RULES:
 2. Listen carefully and identify the caller's intent
 3. COMPANY FACTS FROM THE KNOWLEDGE ONLY: anything about the company (its name, roles, hours, prices, addresses, policies, services) comes ONLY from the BUSINESS INFORMATION, FAQs, COMPANY KNOWLEDGE and KNOWLEDGE DOCUMENTS above. If a company fact is not there, say you don't have that information and offer to connect the caller with the team — never invent it.
 3b. OTHER QUESTIONS: a general question that is not about the company (general knowledge, a word's meaning, a simple calculation, small talk) — think it through and answer it briefly and helpfully from your own knowledge in one or two sentences, then offer to help with anything about the company. Only decline what is harmful or inappropriate.
+3c. LANGUAGE: follow the LANGUAGE RULES at the end of these instructions strictly.
+3d. STAY ON CAMPAIGN: you represent {config.company_name}'s current hiring campaign. For small talk or questions unrelated to the company (weather, sports, jokes, politics...), give at most one short friendly sentence, then bring the conversation back to the roles the company is hiring for and how to apply. For gibberish, ask them politely to rephrase. Never send the same sentence twice; vary your wording.
 4. If you can't help, offer to transfer to a human agent
 5. Keep responses concise and conversational (suitable for voice)
 6. Never make up information you don't have
@@ -177,9 +192,12 @@ AVAILABLE INTENTS:
         """
         # Initialize conversation history for new calls
         if call_id not in self.conversation_history:
-            self.conversation_history[call_id] = [
-                {"role": "system", "content": self._build_system_prompt()}
-            ]
+            prompt = self._build_system_prompt("chat" if self.is_chat(call_id) else "calls")
+            if self.is_chat(call_id):
+                prompt += ("\n\nThis is a TEXT CHAT on the company website, not a phone call: never say "
+                           "\"thank you for calling\"; when the chat ends say something like \"Thanks for chatting with us\". "
+                           "Keep answers short and friendly.")
+            self.conversation_history[call_id] = [{"role": "system", "content": prompt}]
             logger.info(f"New call started: {call_id}")
         
         # Add user message to history
@@ -196,7 +214,9 @@ AVAILABLE INTENTS:
         llm_ready = self._llm_available()
         # Company name, address, contact details, hours, roles: straight
         # from Agent Setup, before any search or AI model.
-        kb_hit = self._company_fact(call_id, user_message)
+        kb_hit = None if llm_ready else self._conversation(call_id).guard(user_message)
+        if kb_hit is None:
+            kb_hit = self._company_fact(call_id, user_message)
         if kb_hit is None:
             if llm_ready:
                 kb_hit = self._faq_lookup(self._significant_words(user_message))
@@ -221,11 +241,12 @@ AVAILABLE INTENTS:
 
         try:
             # Call OpenAI API
+            m = ai_model.get()
             response = await self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+                model=m["model"],
                 messages=self.conversation_history[call_id],
-                temperature=settings.OPENAI_TEMPERATURE,
-                max_tokens=settings.OPENAI_MAX_TOKENS,
+                temperature=m["temperature"],
+                max_tokens=m["max_tokens"],
             )
             
             agent_message = response.choices[0].message.content
@@ -252,15 +273,24 @@ AVAILABLE INTENTS:
             )
             
         except Exception as e:
-            logger.error(f"Error processing message for call {call_id}: {e}")
+            # The AI model failed (bad key, quota, timeout...): answer with the
+            # built-in agent instead, so the caller or visitor still gets a reply.
+            logger.warning(f"AI model failed for {call_id} ({e}); answering with the built-in agent")
+            ai_model.report_failure(e)
+            history = self.conversation_history.get(call_id) or []
+            if history and history[-1].get("role") == "user":
+                history.pop()      # _converse adds the turn itself through the Conversation
+            answer, intent = self._converse(call_id, user_message)
+            self.conversation_history.setdefault(call_id, []).extend(
+                [{"role": "user", "content": user_message}, {"role": "assistant", "content": answer}])
             return AgentResponse(
-                message="I'm sorry, I'm having trouble processing your request right now. Let me connect you with someone who can help.",
-                intent="error",
-                confidence=0.0,
+                message=answer,
+                intent=intent,
+                confidence=0.8,
                 call_id=call_id,
                 timestamp=datetime.utcnow().isoformat(),
-                requires_action=True,
-                action_data={"action": "transfer_to_human"}
+                requires_action=self._check_requires_action(intent),
+                action_data=self._get_action_data(intent, user_message)
             )
     
     def think(self, question: str, situation: str, history: Optional[list] = None) -> Optional[str]:
@@ -290,20 +320,19 @@ AVAILABLE INTENTS:
             "and helpfully from your own knowledge.\n"
             "- Decline only what is harmful, offensive or inappropriate, politely.\n"
             "- No lists, no markdown, no emojis. Do NOT end with a question: the call adds its own follow-up."
-        )
+        ) + language_settings.prompt_rules("calls")
         messages = [{"role": "system", "content": system}]
         for turn in (history or [])[-6:]:
             messages.append(turn)
         messages.append({"role": "user", "content": question})
         try:
-            if not hasattr(self, "_sync_client"):
-                self._sync_client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=8.0, max_retries=0)
-            response = self._sync_client.chat.completions.create(
-                model=settings.OPENAI_MODEL, messages=messages, temperature=0.4, max_tokens=120)
+            response = ai_model.client(sync=True, timeout=8.0).chat.completions.create(
+                model=ai_model.get()["model"], messages=messages, temperature=0.4, max_tokens=120)
             answer = re.sub(r"\s+", " ", (response.choices[0].message.content or "")).strip()
             return answer or None
         except Exception as e:
             logger.warning(f"AI model could not answer {question!r}: {e}")
+            ai_model.report_failure(e)
             return None
 
     def _company_fact(self, call_id: str, message: str) -> Optional[tuple]:
@@ -319,6 +348,9 @@ AVAILABLE INTENTS:
         if not text:
             return None
         state = self.call_state.get(call_id)
+        if state is not None and state.language != "english":
+            from app.services import chat_language
+            return chat_language.localize(state.language, text, state.turns), "general_inquiry"
         if state is not None and state.asking:
             text += f" Now, back to your application: {state.asking}"
         elif intent == "roles":
@@ -328,16 +360,21 @@ AVAILABLE INTENTS:
     def _converse(self, call_id: str, message: str) -> tuple:
         """Knowledge-base answer for one caller turn, with the call's
         conversation state (no AI model configured)."""
+        # Greetings, thanks, language changes, gibberish and off-topic
+        # questions are handled in the Conversation (in the visitor's language).
+        return self._conversation(call_id).reply(message)
+
+    def _conversation(self, call_id: str) -> Conversation:
         state = self.call_state.setdefault(call_id, CallState())
-        if not state.asking:
-            talk = self._small_talk(message)
-            if talk:
-                return talk
         kb = self.config.knowledge_base or {}
         contact = " or ".join(v for v in (kb.get("phone"), kb.get("email")) if v)
         knowledge = KnowledgeBase(self._knowledge_sources(), self.config.company_name)
-        conv = Conversation(knowledge, state, lambda m, topic: self._kb_lookup(m, topic, knowledge), contact)
-        return conv.reply(message)
+        channel = "chat" if self.is_chat(call_id) else "calls"
+        return Conversation(knowledge, state, lambda m, topic: self._kb_lookup(m, topic, knowledge), contact,
+                            company=self.config.company_name, agent=self.config.agent_name,
+                            farewell=self.chat_goodbye() if self.is_chat(call_id) else self.config.farewell,
+                            allowed=language_settings.allowed(channel), default_lang=language_settings.default(channel),
+                            medium="chat" if channel == "chat" else "call")
 
     def _small_talk(self, message: str) -> Optional[tuple]:
         """Greetings and goodbyes, for when no AI model is available."""
@@ -348,12 +385,27 @@ AVAILABLE INTENTS:
             return "Hello! How can I help you today?", "other"
         return None
 
+    def is_chat(self, call_id: str) -> bool:
+        """A text chat (website widget or the dashboard's test chat), not a phone call."""
+        return call_id.startswith("widget-") or call_id in self.chat_sessions
+
+    def chat_welcome(self) -> str:
+        """The first message of a text chat (Chat > Widget setup > Welcome message)."""
+        w = (store.get_doc("widget") or {}).get("welcome") or ""
+        cfg = self.config
+        return w.strip() or f"Hi! I'm {cfg.agent_name or 'the assistant'} from {cfg.company_name or 'our team'}. How can I help you today?"
+
+    def chat_goodbye(self) -> str:
+        """How a text chat ends (Chat > Widget setup > Goodbye message): the
+        phone farewell says "thank you for calling"."""
+        g = (store.get_doc("widget") or {}).get("goodbye") or ""
+        return g.strip() or f"Thanks for chatting with {self.config.company_name or 'us'}! Have a wonderful day."
+
     @staticmethod
     def _llm_available() -> bool:
-        """False when no real OpenAI key is set (empty, or still the
-        placeholder from .env.example) — calling the API would only fail."""
-        key = (settings.OPENAI_API_KEY or "").strip()
-        return bool(key) and "your" not in key and key != "sk-..."
+        """An AI model is set up and switched on (Settings > System > AI
+        Model); otherwise the agent uses its built-in rules."""
+        return ai_model.available()
 
     @staticmethod
     def _significant_words(text: str) -> set:
@@ -471,7 +523,7 @@ Return only the category name, nothing else."""
 
         try:
             response = await self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+                model=ai_model.get()["model"],
                 messages=[{"role": "user", "content": intent_prompt}],
                 temperature=0.1,
                 max_tokens=20
@@ -517,11 +569,12 @@ Return only the category name, nothing else."""
             "content": user_message
         })
         
+        m = ai_model.get()
         stream = await self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=m["model"],
             messages=self.conversation_history[call_id],
-            temperature=settings.OPENAI_TEMPERATURE,
-            max_tokens=settings.OPENAI_MAX_TOKENS,
+            temperature=m["temperature"],
+            max_tokens=m["max_tokens"],
             stream=True
         )
         
@@ -540,6 +593,7 @@ Return only the category name, nothing else."""
     
     def end_call(self, call_id: str) -> dict:
         """End a call and return summary"""
+        self.chat_sessions.discard(call_id)
         history = self.conversation_history.pop(call_id, [])
         state = self.call_state.pop(call_id, None)
         if state and state.answers:

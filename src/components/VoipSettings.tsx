@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { telephonyApi, outboundApi, TelephonySettings, CrmPull } from '../utils/outboundApi';
 import InboundSettings from './InboundSettings';
+import CrmWebhookCard from './CrmWebhookCard';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 // Agent Setup > VoIP & Calling: the VoIP provider the agent calls
 // applicants through, and when it calls. Stored by the backend
@@ -10,7 +12,7 @@ const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const input = 'w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none';
 const label = 'block text-sm font-medium text-gray-300 mb-1.5';
 
-export type VoipSection = 'provider' | 'inbound' | 'rules' | 'voice';
+export type VoipSection = 'provider' | 'inbound' | 'rules' | 'voice' | 'webhooks';
 
 // One instance is kept across the Agent Setup tabs, so edits on one tab
 // are still there on the others until saved.
@@ -21,6 +23,7 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
   const [busy, setBusy] = useState<'' | 'save' | 'test' | 'crm'>('');
   const [crm, setCrm] = useState<{ last: CrmPull | null; imported_total: number } | null>(null);
   useEffect(() => { outboundApi.crmStatus().then(setCrm).catch(() => {}); }, []);
+  const [tel, setTel] = useLocalStorage<{ enableSip?: boolean; webhookUrl?: string; [k: string]: unknown }>('settings-telephony', {});
 
   const load = () => {
     setLoadError('');
@@ -163,6 +166,17 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
           </div>
           </>)}
         </div>
+
+        <div className="flex items-center justify-between gap-4 pt-4 border-t border-gray-800">
+          <div>
+            <p className="text-sm font-medium text-gray-300">Enable SIP Trunking</p>
+            <p className="text-xs text-gray-500">Connect via SIP protocol for on-premise PBX integration. Saved automatically.</p>
+          </div>
+          <button type="button" aria-pressed={!!tel.enableSip} onClick={() => setTel({ ...tel, enableSip: !tel.enableSip })}
+            className={`relative w-11 h-6 rounded-full transition-all shrink-0 ${tel.enableSip ? 'bg-violet-600' : 'bg-gray-700'}`}>
+            <span className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform" style={{ transform: tel.enableSip ? 'translateX(20px)' : 'none' }}></span>
+          </button>
+        </div>
       </div>
 
       )}
@@ -241,12 +255,12 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
 
       )}
 
-      {/* Voice + CRM */}
+      {/* Call voice */}
       {section === 'voice' && (
       <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-5">
         <h3 className="text-lg font-semibold text-white flex items-center gap-2">
           <i className="fa-solid fa-microphone-lines text-violet-400"></i>
-          Voice & CRM
+          Call voice
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
@@ -263,20 +277,25 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
             <input type="text" value={s.voice} placeholder={s.provider === 'telnyx' ? 'female' : s.provider === 'vonage' ? 'provider default' : isSip ? 'Windows voice, e.g. Hazel' : 'Polly.Amy'}
               onChange={(e) => set({ voice: e.target.value })} className={input} />
           </div>
-          <div className="md:col-span-2">
-            <label className={label}>Result webhook URL (your CRM)</label>
-            <input type="text" value={s.result_webhook_url} placeholder="https://your-crm.example.com/webhooks/ai-call-result"
-              onChange={(e) => set({ result_webhook_url: e.target.value })} className={input} />
-            <p className="text-xs text-gray-500 mt-1">When a call finishes, its outcome (interested, not interested, call back, do not call) and transcript are POSTed here as JSON.</p>
-          </div>
+          <p className="md:col-span-2 text-xs text-gray-500">
+            <i className="fa-solid fa-link mr-1.5"></i>Connecting your CRM (receiving applicants by webhook, fetching them from its API, sending call results back) is on the <strong className="text-gray-300">Webhooks</strong> tab.
+          </p>
         </div>
 
-        <div className="border-t border-gray-800 pt-5 space-y-4">
-          <h4 className="text-sm font-semibold text-white flex items-center gap-2">
-            <i className="fa-solid fa-cloud-arrow-down text-violet-400"></i>
-            Fetch applicants from your CRM
-          </h4>
-          <p className="text-xs text-gray-500 -mt-2">The agent calls your CRM's API (GET, JSON array of applicants) and queues a job call for each new applicant. Applicants already imported are not queued twice.</p>
+      </div>
+
+      )}
+
+      {/* Webhooks: in from your CRM (applicants), out to your CRM (call results) */}
+      {section === 'webhooks' && (<>
+        <CrmWebhookCard />
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+              <i className="fa-solid fa-cloud-arrow-down text-violet-400"></i>Fetch applicants from your CRM (API)
+            </h3>
+          </div>
+          <p className="text-sm text-gray-400 -mt-2">The agent calls your CRM's API (GET, JSON array of applicants) and queues a job call for each new applicant. Applicants already imported are not queued twice.</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
               <label className={label}>CRM API URL</label>
@@ -314,9 +333,51 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
             )}
           </div>
         </div>
-      </div>
-
-      )}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+              <i className="fa-solid fa-paper-plane text-violet-400"></i>Result webhook (send call results)
+            </h3>
+            <p className="text-sm text-gray-400 mt-1">
+              When a job call finishes, its outcome (interested, not interested, call back, do not call, …), the notes and the
+              transcript are POSTed to this URL as JSON, so your CRM can update the applicant. Sent with your CRM API key
+              (above) as <code className="text-gray-300">Authorization: Bearer …</code> when one is set.
+            </p>
+          </div>
+          <div>
+            <label className={label}>Result webhook URL (your CRM)</label>
+            <input type="text" value={s.result_webhook_url} placeholder="https://your-crm.example.com/webhooks/ai-call-result"
+              onChange={(e) => set({ result_webhook_url: e.target.value })} className={input} />
+            <p className="text-xs text-gray-500 mt-1">
+              {(s.result_webhook_url || '').trim() ? 'Results are sent when each call finishes.' : 'Leave blank to keep results in the dashboard only.'}
+              {' '}Save with <strong className="text-gray-300">Save VoIP Settings</strong> below.
+            </p>
+          </div>
+          <details className="text-sm">
+            <summary className="cursor-pointer text-violet-300">Example result</summary>
+            <pre className="mt-2 bg-gray-950 border border-gray-800 rounded-lg p-3 text-xs text-gray-300 overflow-x-auto">{JSON.stringify({
+              event: 'call.finished', call_id: '9f2c…', applicant_id: 'A-1042', job_id: 'VAC-701', phone: '+447700900123',
+              status: 'completed', outcome: 'interested', attempts: 1,
+              notes_summary: 'Asked: What is the salary?\nDecision: yes I am interested',
+              finished_at: '2026-11-19T15:30:12+00:00',
+            }, null, 2)}</pre>
+          </details>
+        </div>
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+              <i className="fa-solid fa-satellite-dish text-violet-400"></i>Call events webhook
+            </h3>
+            <p className="text-sm text-gray-400 mt-1">Where call events are sent.</p>
+          </div>
+          <div>
+            <label className={label}>Webhook URL</label>
+            <input type="text" value={tel.webhookUrl || ''} placeholder="https://yourdomain.com/webhooks/calls"
+              onChange={(e) => setTel({ ...tel, webhookUrl: e.target.value })} className={`${input} font-mono`} />
+            <p className="text-xs text-gray-500 mt-1">URL where call events will be sent. Must be publicly accessible. Saved automatically.</p>
+          </div>
+        </div>
+      </>)}
 
       {status && (
         <div className={`text-sm px-4 py-3 rounded-lg border ${status.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-red-500/10 border-red-500/30 text-red-300'}`}>
