@@ -14,6 +14,7 @@ interface Rules {
   wrong_number_to_dnc: boolean;
   voicemail_retry_minutes: number;
   max_calls_per_day: number;
+  recall_after_days: number;
 }
 interface Hold { number: string; reason: string; since: string; until: string }
 interface View { rules: Rules; defaults: Rules; holds: Hold[] }
@@ -130,7 +131,7 @@ export default function CallRules() {
             <Rule icon="fa-hourglass-half" title="No time given" desc={'"Call me back later", "I\'m busy".'}>
               after <input type="number" min={5} max={10080} value={form.callback_default_minutes} onChange={num('callback_default_minutes')} className={input} /> min
             </Rule>
-            <Rule icon="fa-repeat" title="Callbacks per applicant" desc="Then the call stays as Callback for a recruiter.">
+            <Rule icon="fa-repeat" title="Callbacks per contact" desc="Then the call stays as Callback for your team.">
               up to <input type="number" min={0} max={5} value={form.callback_max} onChange={num('callback_max')} className={input} />
             </Rule>
           </div>
@@ -145,6 +146,17 @@ export default function CallRules() {
         </Rule>
         <Rule icon="fa-voicemail" title="Voicemail answered" desc="Try again later (counts as an attempt, like no answer).">
           retry after <input type="number" min={5} max={10080} value={form.voicemail_retry_minutes} onChange={num('voicemail_retry_minutes')} className={input} /> min
+        </Rule>
+
+        <Rule icon="fa-user-check" title="Same contact fetched again"
+          desc="When your portal or a CSV sends a contact (for the same job) that the agent has already called. Remembered even if you remove the row from Job Calls.">
+          <select value={form.recall_after_days} onChange={(e) => set({ recall_after_days: Number(e.target.value) })}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 outline-none">
+            <option value={0}>Never call again</option>
+            <option value={30}>Call again after 30 days</option>
+            <option value={60}>Call again after 60 days</option>
+            <option value={90}>Call again after 90 days</option>
+          </select>
         </Rule>
 
         <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 pt-2">Limits</p>

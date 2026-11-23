@@ -4,7 +4,8 @@ MySQL storage for everything the app keeps.
 Two tables in the database named in DATABASE_URL (created on start-up,
 together with the database itself):
 
-- documents: one JSON document per name. The agent's setup
+- settings: one JSON document per name (called "documents" before;
+  renamed on start-up). The agent's setup
   ("agent_config"), telephony/VoIP settings ("telephony"), the live voice
   settings ("voice"), CRM import state ("crm_import") and every setting the
   web app keeps ("ui:<key>", e.g. ui:agent-identity).
@@ -91,8 +92,15 @@ def init() -> None:
     finally:
         boot.dispose()
     with engine().begin() as c:
+        # The table was called "documents" before: rename it once.
+        tables = {r[0] for r in c.execute(text("SHOW TABLES"))}
+        if "documents" in tables and "settings" not in tables:
+            c.execute(text("RENAME TABLE documents TO settings"))
+            logger.info("MySQL: table documents renamed to settings")
+        elif "documents" in tables:
+            logger.warning("MySQL: both documents and settings tables exist; using settings")
         c.execute(text("""
-            CREATE TABLE IF NOT EXISTS documents (
+            CREATE TABLE IF NOT EXISTS settings (
                 name VARCHAR(191) NOT NULL PRIMARY KEY,
                 value LONGTEXT NOT NULL,
                 updated_at DATETIME NOT NULL
@@ -137,29 +145,29 @@ def _import_json_files() -> None:
                 logger.warning(f"Could not import {path.name}: {e}")
 
 
-# ---- documents ----
+# ---- settings (one JSON document per name) ----
 
 def get_doc(name: str, default: Any = None) -> Any:
     with engine().connect() as c:
-        row = c.execute(text("SELECT value FROM documents WHERE name = :n"), {"n": name}).first()
+        row = c.execute(text("SELECT value FROM settings WHERE name = :n"), {"n": name}).first()
     return json.loads(row[0]) if row else default
 
 
 def put_doc(name: str, value: Any) -> None:
     with engine().begin() as c:
-        c.execute(text("""INSERT INTO documents (name, value, updated_at) VALUES (:n, :v, :t)
+        c.execute(text("""INSERT INTO settings (name, value, updated_at) VALUES (:n, :v, :t)
                           ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)"""),
                   {"n": name, "v": json.dumps(value, ensure_ascii=False), "t": _now()})
 
 
 def delete_doc(name: str) -> None:
     with engine().begin() as c:
-        c.execute(text("DELETE FROM documents WHERE name = :n"), {"n": name})
+        c.execute(text("DELETE FROM settings WHERE name = :n"), {"n": name})
 
 
 def list_docs(prefix: str) -> dict:
     with engine().connect() as c:
-        rows = c.execute(text("SELECT name, value FROM documents WHERE name LIKE :p"),
+        rows = c.execute(text("SELECT name, value FROM settings WHERE name LIKE :p"),
                          {"p": prefix.replace("%", r"\%").replace("_", r"\_") + "%"}).all()
     return {name[len(prefix):]: json.loads(value) for name, value in rows}
 

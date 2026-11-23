@@ -133,7 +133,7 @@ function App() {
               {currentPage === 'realcall' && 'Dial any number for the AI agent to call, or test it in your browser'}
               {currentPage === 'webchat' && 'Website chat conversations by visitor email, a test chat with your agent, and the widget for your site'}
               {currentPage === 'inbound' && 'Every call the agent answered on your inbound extension: transcripts, recordings and history'}
-              {currentPage === 'jobcalls' && 'The AI agent calls applicants about matching jobs from your CRM or a CSV'}
+              {currentPage === 'jobcalls' && 'The AI agent calls contacts about matching jobs from your CRM or a CSV'}
               {currentPage === 'dnc' && 'People who asked not to be contacted again: the agent never calls these numbers'}
               {currentPage === 'analytics' && 'View call history and performance metrics'}
               {currentPage === 'settings' && 'Agent, calling, automation and system settings in one place'}

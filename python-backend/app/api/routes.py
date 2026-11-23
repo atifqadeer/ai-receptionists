@@ -184,52 +184,6 @@ async def hold_call(request: Request, call_id: str):
     return {"success": success}
 
 
-# ---- Analytics Router ----
-analytics_router = APIRouter()
-
-
-@analytics_router.get("/dashboard")
-async def get_dashboard_stats(request: Request):
-    """Get dashboard statistics"""
-    call_manager = request.app.state.call_manager
-    stats = await call_manager.get_call_stats()
-    
-    return {
-        "total_calls": stats.get("total_calls", 1247),
-        "calls_handled": stats.get("resolved", 1189),
-        "avg_response_time": 1.2,
-        "satisfaction_rate": 94.7,
-        "resolution_rate": stats.get("resolution_rate", 95.3),
-        "transfer_rate": stats.get("transfer_rate", 4.7),
-    }
-
-
-@analytics_router.get("/hourly")
-async def get_hourly_distribution():
-    """Get hourly call distribution"""
-    return [
-        {"hour": "8AM", "calls": 12}, {"hour": "9AM", "calls": 45},
-        {"hour": "10AM", "calls": 67}, {"hour": "11AM", "calls": 54},
-        {"hour": "12PM", "calls": 38}, {"hour": "1PM", "calls": 42},
-        {"hour": "2PM", "calls": 58}, {"hour": "3PM", "calls": 49},
-        {"hour": "4PM", "calls": 36}, {"hour": "5PM", "calls": 28},
-        {"hour": "6PM", "calls": 15}, {"hour": "7PM", "calls": 8},
-    ]
-
-
-@analytics_router.get("/intents")
-async def get_intent_distribution():
-    """Get intent distribution"""
-    return [
-        {"name": "Appointment Booking", "count": 423, "percentage": 34},
-        {"name": "General Inquiry", "count": 312, "percentage": 25},
-        {"name": "Business Hours", "count": 187, "percentage": 15},
-        {"name": "Technical Support", "count": 156, "percentage": 13},
-        {"name": "Complaints", "count": 89, "percentage": 7},
-        {"name": "Other", "count": 80, "percentage": 6},
-    ]
-
-
 # ---- Webhooks Router ----
 webhooks_router = APIRouter()
 

@@ -32,8 +32,12 @@ const GROUPS: Group[] = [
       { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset' },
       { id: 'rules', label: 'Outbound Calling', icon: 'fa-clock' },
       { id: 'voice', label: 'Call Voice', icon: 'fa-microphone-lines' },
-      { id: 'webhooks', label: 'Webhooks', icon: 'fa-link' },
     ],
+  },
+  {
+    id: 'webhooks', label: 'Webhooks', icon: 'fa-link', desc: 'Portal fetch & status APIs',
+    saveNote: 'Saved with Save VoIP Settings to the backend.',
+    tabs: [{ id: 'webhooks', label: 'Portal APIs', icon: 'fa-arrow-right-arrow-left' }],
   },
   {
     id: 'automation', label: 'GuardRails', icon: 'fa-shield-halved', desc: 'Call rules & safeguards',
@@ -41,13 +45,12 @@ const GROUPS: Group[] = [
     tabs: [{ id: 'calls', label: 'Call Rules', icon: 'fa-scale-balanced' }],
   },
   {
-    id: 'system', label: 'System', icon: 'fa-sliders', desc: 'Integrations, AI model & API keys',
+    id: 'system', label: 'System', icon: 'fa-sliders', desc: 'General, integrations & AI model',
     saveNote: 'AI Model saves with its own button; the other tabs save as you type.',
     tabs: [
       { id: 'general', label: 'General', icon: 'fa-cog' },
       { id: 'integrations', label: 'Integrations', icon: 'fa-plug' },
       { id: 'ai', label: 'AI Model', icon: 'fa-brain' },
-      { id: 'api', label: 'API Keys', icon: 'fa-key' },
     ],
   },
 ];
@@ -65,7 +68,7 @@ export default function SettingsHub() {
   return (
     <div className="space-y-6">
       {/* Group tabs */}
-      <div role="tablist" aria-label="Settings groups" className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+      <div role="tablist" aria-label="Settings groups" className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
         {GROUPS.map((g) => {
           const active = g.id === group.id;
           return (
@@ -131,7 +134,7 @@ export default function SettingsHub() {
       {/* Content. Agent and Calling share one form instance (it holds the
           VoIP settings across tabs), so edits survive switching tabs. */}
       <div key={group.id === 'calling' ? 'agent' : group.id}>
-        {(group.id === 'agent' || group.id === 'calling') && tab.id !== 'languages' && <SetupForm section={tab.id} />}
+        {(group.id === 'agent' || group.id === 'calling' || group.id === 'webhooks') && tab.id !== 'languages' && <SetupForm section={tab.id} />}
         {group.id === 'agent' && tab.id === 'languages' && <LanguageSettings />}
         {group.id === 'automation' && <CallRules />}
         {group.id === 'system' && <Settings section={tab.id} />}

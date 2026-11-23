@@ -79,7 +79,7 @@ def answer(intent: str, company: str, profile: dict, roles: Optional[list] = Non
     profile = profile or {}
     company = _clean(company) or "our company"
     if intent == "how_number":
-        return (f"Your details are registered with {company} as a job applicant, which is why we're "
+        return (f"Your details are registered with {company}, which is why we're "
                 f"{'calling you' if calling else 'in touch'} about job opportunities. If you'd rather not be "
                 f"contacted, just tell me and I'll make sure we don't call you again.")
     if intent == "why_call":

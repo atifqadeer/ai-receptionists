@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
-import { telephonyApi, outboundApi, TelephonySettings, CrmPull } from '../utils/outboundApi';
+import { telephonyApi, outboundApi, TelephonySettings, CrmStatus } from '../utils/outboundApi';
 import InboundSettings from './InboundSettings';
-import CrmWebhookCard from './CrmWebhookCard';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
 // Agent Setup > VoIP & Calling: the VoIP provider the agent calls
-// applicants through, and when it calls. Stored by the backend
+// contacts through, and when it calls. Stored by the backend
 // (python-backend/data/telephony.json); secrets come back masked.
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -20,10 +19,11 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
   const [s, setS] = useState<TelephonySettings | null>(null);
   const [loadError, setLoadError] = useState('');
   const [status, setStatus] = useState<{ ok: boolean; message: string } | null>(null);
-  const [busy, setBusy] = useState<'' | 'save' | 'test' | 'crm'>('');
-  const [crm, setCrm] = useState<{ last: CrmPull | null; imported_total: number } | null>(null);
-  useEffect(() => { outboundApi.crmStatus().then(setCrm).catch(() => {}); }, []);
-  const [tel, setTel] = useLocalStorage<{ enableSip?: boolean; webhookUrl?: string; [k: string]: unknown }>('settings-telephony', {});
+  const [busy, setBusy] = useState<'' | 'save' | 'test' | 'crm' | 'resend' | 'status'>('');
+  const [crm, setCrm] = useState<CrmStatus | null>(null);
+  const loadCrm = () => outboundApi.crmStatus().then(setCrm).catch(() => {});
+  useEffect(() => { loadCrm(); }, []);
+  const [tel, setTel] = useLocalStorage<{ enableSip?: boolean; [k: string]: unknown }>('settings-telephony', {});
 
   const load = () => {
     setLoadError('');
@@ -55,18 +55,36 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
     try {
       await persist();
       const r = await outboundApi.crmPull();
-      setCrm({ last: r, imported_total: (crm?.imported_total || 0) + (r.added || 0) });
-      setStatus({ ok: true, message: `CRM: ${r.fetched} applicants fetched, ${r.added} new queued on Job Calls, `
-        + `${r.already_imported} already imported${r.rejected?.length ? `, ${r.rejected.length} rejected` : ''}.` });
+      await loadCrm();
+      setStatus({ ok: true, message: `Data refreshed: ${r.fetched} contacts fetched, ${r.added} new queued on Job Calls, `
+        + `${r.already_imported} already on Job Calls${r.already_called ? `, ${r.already_called} already called (not queued again)` : ''}`
+        + `${r.rejected?.length ? `, ${r.rejected.length} rejected` : ''}.` });
     } catch (e: any) {
-      setStatus({ ok: false, message: e.message || 'Could not fetch from the CRM' });
+      setStatus({ ok: false, message: e.message || 'Could not fetch from the portal' });
+      loadCrm();
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const resend = async () => {
+    setBusy('resend');
+    setStatus(null);
+    try {
+      await persist();
+      const r = await outboundApi.crmResend();
+      setCrm(r.status);
+      setStatus({ ok: r.failed === 0, message: r.tried === 0 ? 'Nothing to resend: every status was accepted.'
+        : `Resent ${r.tried}: ${r.sent} accepted${r.failed ? `, ${r.failed} still failing (${r.status.results.last?.error || 'see below'})` : ''}.` });
+    } catch (e: any) {
+      setStatus({ ok: false, message: e.message });
     } finally {
       setBusy('');
     }
   };
 
   const persist = async () => {
-    const { providers, configured, missing, within_calling_hours, webhook_token, ...body } = s;
+    const { providers, configured, missing, within_calling_hours, ...body } = s;
     const saved = await telephonyApi.save(body);
     setS(saved);
     return saved;
@@ -161,7 +179,7 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
             <label className={label}>PBX SIP domain (for extensions)</label>
             <input type="text" value={s.sip_domain || ''} placeholder="pbx.yourcompany.com" onChange={(e) => set({ sip_domain: e.target.value })} className={input} />
             <p className="text-xs text-gray-500 mt-1">
-              Applicants with a 3–6 digit extension (e.g. 204 or 1234) are called as <code className="text-gray-300">sip:1234@{s.sip_domain || 'pbx.yourcompany.com'}</code> through your provider's SIP connection to your PBX.
+              Contacts with a 3–6 digit extension (e.g. 204 or 1234) are called as <code className="text-gray-300">sip:1234@{s.sip_domain || 'pbx.yourcompany.com'}</code> through your provider's SIP connection to your PBX.
             </p>
           </div>
           </>)}
@@ -195,11 +213,11 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
           Calling Rules
         </h3>
         <div>
-          <label className={label}>When an applicant arrives from the webhook or CSV</label>
+          <label className={label}>When a contact arrives from your portal or a CSV</label>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {([
-              ['auto', 'Call automatically', 'Dial new applicants straight away, within the calling hours below.'],
-              ['manual', 'Call manually', 'Queue applicants; you press Call or Call all on the Job Calls page.'],
+              ['auto', 'Call automatically', 'Dial new contacts straight away, within the calling hours below.'],
+              ['manual', 'Call manually', 'Queue contacts; you press Call or Call all on the Job Calls page.'],
             ] as const).map(([mode, title, desc]) => (
               <button key={mode} onClick={() => set({ call_mode: mode })}
                 className={`text-left p-4 rounded-lg border transition-all ${s.call_mode === mode ? 'border-violet-500 bg-violet-600/10' : 'border-gray-700 hover:border-gray-600'}`}>
@@ -243,7 +261,7 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
             <input type="number" min={1} max={20} value={s.max_concurrent_calls} onChange={(e) => set({ max_concurrent_calls: Number(e.target.value) })} className={input} />
           </div>
           <div>
-            <label className={label}>Attempts per applicant</label>
+            <label className={label}>Attempts per contact</label>
             <input type="number" min={1} max={5} value={s.max_attempts} onChange={(e) => set({ max_attempts: Number(e.target.value) })} className={input} />
           </div>
           <div>
@@ -278,7 +296,7 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
               onChange={(e) => set({ voice: e.target.value })} className={input} />
           </div>
           <p className="md:col-span-2 text-xs text-gray-500">
-            <i className="fa-solid fa-link mr-1.5"></i>Connecting your CRM (receiving applicants by webhook, fetching them from its API, sending call results back) is on the <strong className="text-gray-300">Webhooks</strong> tab.
+            <i className="fa-solid fa-link mr-1.5"></i>Connecting your portal (fetching contacts, sending call statuses back) is on the main <strong className="text-gray-300">Webhooks</strong> settings tab.
           </p>
         </div>
 
@@ -286,31 +304,46 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
 
       )}
 
-      {/* Webhooks: in from your CRM (applicants), out to your CRM (call results) */}
+      {/* Webhooks: the two portal APIs. 1) fetch contacts from it, 2) send call statuses back to it */}
       {section === 'webhooks' && (<>
-        <CrmWebhookCard />
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
-          <div>
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <i className="fa-solid fa-cloud-arrow-down text-violet-400"></i>Fetch applicants from your CRM (API)
-            </h3>
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                <span className="w-6 h-6 rounded-full bg-violet-600 text-white text-xs flex items-center justify-center">1</span>
+                Fetch contacts from your portal
+              </h3>
+              <p className="text-sm text-gray-400 mt-1">
+                <code className="text-gray-300">GET</code> your portal's API (a JSON list of contacts). Each new contact is queued as a job call;
+                ones already imported are not queued twice.
+              </p>
+            </div>
+            <button onClick={fetchCrm} disabled={!!busy || !(s.crm_api_url || '').trim()}
+              className="px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700 disabled:opacity-40 flex items-center gap-2">
+              <i className={`fa-solid fa-rotate ${busy === 'crm' ? 'fa-spin' : ''}`}></i>
+              Refresh data
+            </button>
           </div>
-          <p className="text-sm text-gray-400 -mt-2">The agent calls your CRM's API (GET, JSON array of applicants) and queues a job call for each new applicant. Applicants already imported are not queued twice.</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
-              <label className={label}>CRM API URL</label>
-              <input type="text" value={s.crm_api_url || ''} placeholder="http://127.0.0.1:8100/api/v1/applicants?status=new"
+              <label className={label}>Fetch API URL</label>
+              <input type="text" value={s.crm_api_url || ''} placeholder="https://your-portal.example.com/api/contacts?status=new"
                 onChange={(e) => set({ crm_api_url: e.target.value })} className={input} />
+              <p className="text-xs text-gray-500 mt-1">
+                Put any filters your portal needs in the URL (e.g. <code className="text-gray-300">?status=new&amp;region=10</code>).
+                Results over several pages are all fetched.
+              </p>
             </div>
             <div>
-              <label className={label}>CRM API key</label>
+              <label className={label}>API key</label>
               <input type="password" value={s.crm_api_key || ''} placeholder="sent as Authorization: Bearer …" autoComplete="new-password"
                 onChange={(e) => set({ crm_api_key: e.target.value })} className={input} />
+              <p className="text-xs text-gray-500 mt-1">Also used for status updates, unless you set a separate key below.</p>
             </div>
             <div>
-              <label className={label}>Fetch automatically</label>
+              <label className={label}>Refresh automatically</label>
               <select value={s.crm_poll_minutes || 0} onChange={(e) => set({ crm_poll_minutes: Number(e.target.value) })} className={input}>
-                <option value={0}>Off (Fetch now only)</option>
+                <option value={0}>Off (Refresh data button only)</option>
                 <option value={1}>Every minute</option>
                 <option value={5}>Every 5 minutes</option>
                 <option value={15}>Every 15 minutes</option>
@@ -318,65 +351,91 @@ export default function VoipSettings({ section }: { section: VoipSection }) {
               </select>
             </div>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <button onClick={fetchCrm} disabled={!!busy || !(s.crm_api_url || '').trim()}
-              className="px-4 py-2 rounded-lg border border-violet-500/40 text-violet-200 text-sm hover:bg-violet-500/10 disabled:opacity-40 flex items-center gap-2">
-              <i className={`fa-solid ${busy === 'crm' ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></i>
-              Fetch now
-            </button>
-            {crm?.last && (
-              <span className={`text-xs ${crm.last.error ? 'text-red-300' : 'text-gray-400'}`}>
-                Last fetch {new Date(crm.last.at).toLocaleString()}: {crm.last.error ? crm.last.error
-                  : `${crm.last.fetched} fetched, ${crm.last.added} queued, ${crm.last.already_imported} already imported`}
-                {' · '}{crm.imported_total} imported in total
+          <div className="text-xs rounded-lg bg-gray-800/40 border border-gray-700/60 px-3 py-2.5">
+            {!crm?.last ? <span className="text-gray-500">Not fetched yet.</span> : crm.last.error ? (
+              <span className="text-red-300"><i className="fa-solid fa-circle-xmark mr-1.5"></i>Last refresh {new Date(crm.last.at).toLocaleString()} failed: {crm.last.error}</span>
+            ) : (
+              <span className="text-gray-300">
+                <i className="fa-solid fa-circle-check text-emerald-400 mr-1.5"></i>Last refresh {new Date(crm.last.at).toLocaleString()}:{' '}
+                {crm.last.fetched} fetched, {crm.last.added} new queued, {crm.last.already_imported} already on Job Calls
+                {crm.last.already_called ? `, ${crm.last.already_called} already called` : ''}
+                {crm.last.rejected?.length ? `, ${crm.last.rejected.length} rejected (${crm.last.rejected.map((x) => x.reason).slice(0, 2).join('; ')})` : ''}
+                <span className="text-gray-500"> · {crm.imported_total} imported in total</span>
               </span>
             )}
           </div>
         </div>
+
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                <span className="w-6 h-6 rounded-full bg-violet-600 text-white text-xs flex items-center justify-center">2</span>
+                Send call status back to your portal
+              </h3>
+              <p className="text-sm text-gray-400 mt-1">
+                When a job call finishes, its status (interested, not interested, call back, do not call, …), notes and transcript are
+                sent with <code className="text-gray-300">POST</code> as JSON, with its API key. If your portal doesn't accept it,
+                it is tried again every 5 minutes (up to 6 times).
+              </p>
+            </div>
+            <button onClick={resend} disabled={!!busy || !(s.result_webhook_url || '').trim() || !crm?.results.unsent}
+              className="px-4 py-2 rounded-lg border border-violet-500/40 text-violet-200 text-sm hover:bg-violet-500/10 disabled:opacity-40 flex items-center gap-2"
+              title={crm?.results.unsent ? 'Send the statuses your portal did not accept again' : 'Nothing waiting to be resent'}>
+              <i className={`fa-solid ${busy === 'resend' ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i>
+              Resend failed{crm?.results.unsent ? ` (${crm.results.unsent})` : ''}
+            </button>
+          </div>
           <div>
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <i className="fa-solid fa-paper-plane text-violet-400"></i>Result webhook (send call results)
-            </h3>
-            <p className="text-sm text-gray-400 mt-1">
-              When a job call finishes, its outcome (interested, not interested, call back, do not call, …), the notes and the
-              transcript are POSTed to this URL as JSON, so your CRM can update the applicant. Sent with your CRM API key
-              (above) as <code className="text-gray-300">Authorization: Bearer …</code> when one is set.
+            <label className={label}>Status API URL</label>
+            <input type="text" value={s.result_webhook_url} placeholder="https://your-portal.example.com/api/v1/call-results"
+              onChange={(e) => set({ result_webhook_url: e.target.value })} className={input} />
+            {!(s.result_webhook_url || '').trim() && <p className="text-xs text-gray-500 mt-1">Leave blank to keep statuses in this app only.</p>}
+          </div>
+          <div>
+            <label className={label}>Status API key <span className="text-gray-500 font-normal">(optional)</span></label>
+            <input type="password" value={s.crm_result_key || ''} autoComplete="new-password"
+              placeholder={(s.crm_api_key || '').trim() ? 'Blank: the fetch API key is used' : 'sent as Authorization: Bearer …'}
+              onChange={(e) => set({ crm_result_key: e.target.value })} className={input} />
+            <p className="text-xs text-gray-500 mt-1">
+              Sent as <code className="text-gray-300">Authorization: Bearer …</code> and <code className="text-gray-300">X-API-Key</code>.
+              {(s.crm_result_key || '').trim() ? ' This key is used for status updates.' : ' Leave blank to use the fetch API key (above).'}
             </p>
           </div>
           <div>
-            <label className={label}>Result webhook URL (your CRM)</label>
-            <input type="text" value={s.result_webhook_url} placeholder="https://your-crm.example.com/webhooks/ai-call-result"
-              onChange={(e) => set({ result_webhook_url: e.target.value })} className={input} />
+            <label className={label}>Your portal's ID field <span className="text-gray-500 font-normal">(optional)</span></label>
+            <input type="text" value={s.crm_id_field || ''} placeholder="e.g. id, customer_id, lead_id"
+              onChange={(e) => set({ crm_id_field: e.target.value.replace(/[^\w.-]/g, '') })} className={`${input} font-mono`} />
             <p className="text-xs text-gray-500 mt-1">
-              {(s.result_webhook_url || '').trim() ? 'Results are sent when each call finishes.' : 'Leave blank to keep results in the dashboard only.'}
-              {' '}Save with <strong className="text-gray-300">Save VoIP Settings</strong> below.
+              The contact's ID is always sent as <code className="text-gray-300">contact_id</code>; it is also sent under this name
+              if your portal expects a different one.
             </p>
+          </div>
+          <div className="text-xs rounded-lg bg-gray-800/40 border border-gray-700/60 px-3 py-2.5 flex items-center gap-3 flex-wrap">
+            <span className="text-gray-300"><i className="fa-solid fa-circle-check text-emerald-400 mr-1.5"></i>{crm?.results.sent ?? 0} accepted</span>
+            <span className={crm?.results.unsent ? 'text-amber-300' : 'text-gray-500'}><i className="fa-solid fa-clock-rotate-left mr-1.5"></i>{crm?.results.unsent ?? 0} waiting to resend</span>
+            {crm?.results.last && (
+              <span className={crm.results.last.ok ? 'text-gray-400' : 'text-red-300'}>
+                Last: {crm.results.last.name || 'call'} ({crm.results.last.outcome || crm.results.last.status}) {new Date(crm.results.last.at).toLocaleString()}
+                {crm.results.last.ok ? ', accepted' : `, not accepted: ${crm.results.last.error}`}
+              </span>
+            )}
+            <button onClick={loadCrm} className="ml-auto text-gray-400 hover:text-gray-200" title="Refresh this status">
+              <i className="fa-solid fa-rotate"></i>
+            </button>
           </div>
           <details className="text-sm">
-            <summary className="cursor-pointer text-violet-300">Example result</summary>
+            <summary className="cursor-pointer text-violet-300">Example of what is sent</summary>
             <pre className="mt-2 bg-gray-950 border border-gray-800 rounded-lg p-3 text-xs text-gray-300 overflow-x-auto">{JSON.stringify({
-              event: 'call.finished', call_id: '9f2c…', applicant_id: 'A-1042', job_id: 'VAC-701', phone: '+447700900123',
-              status: 'completed', outcome: 'interested', attempts: 1,
-              notes_summary: 'Asked: What is the salary?\nDecision: yes I am interested',
+              event: 'call.finished', call_id: '9f2c…', ...(s.crm_id_field ? { [s.crm_id_field]: 'A-1042' } : {}),
+              contact_id: 'A-1042', contact_name: 'Sam Patel', job_id: 'VAC-701',
+              job_title: 'Warehouse Operative', phone: '+447700900123', status: 'completed', outcome: 'interested', attempts: 1,
+              callback_when: null, notes_summary: 'Asked: What is the salary?\nDecision: yes I am interested',
               finished_at: '2026-11-19T15:30:12+00:00',
             }, null, 2)}</pre>
           </details>
         </div>
-        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
-          <div>
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <i className="fa-solid fa-satellite-dish text-violet-400"></i>Call events webhook
-            </h3>
-            <p className="text-sm text-gray-400 mt-1">Where call events are sent.</p>
-          </div>
-          <div>
-            <label className={label}>Webhook URL</label>
-            <input type="text" value={tel.webhookUrl || ''} placeholder="https://yourdomain.com/webhooks/calls"
-              onChange={(e) => setTel({ ...tel, webhookUrl: e.target.value })} className={`${input} font-mono`} />
-            <p className="text-xs text-gray-500 mt-1">URL where call events will be sent. Must be publicly accessible. Saved automatically.</p>
-          </div>
-        </div>
+        <p className="text-xs text-gray-500">Change a URL or key, then <strong className="text-gray-300">Save VoIP Settings</strong> below (Refresh data and Resend save first).</p>
       </>)}
 
       {status && (

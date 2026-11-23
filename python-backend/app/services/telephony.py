@@ -16,7 +16,6 @@ the agent config. Secrets are never returned to the dashboard in full.
 import asyncio
 import json
 import re
-import secrets
 import time
 import uuid
 from datetime import datetime
@@ -102,9 +101,10 @@ DEFAULT_SETTINGS = {
     # for each new one; see outbound.pull_from_crm.
     "crm_api_url": "",              # e.g. http://127.0.0.1:8100/api/v1/applicants?status=new
     "crm_api_key": "",              # sent as "Authorization: Bearer ..." and "X-API-Key"
-    "crm_poll_minutes": 0,          # 0 = only when "Fetch now" is pressed
+    "crm_result_key": "",           # key for the status API; blank = use crm_api_key
+    "crm_poll_minutes": 0,          # 0 = only when "Refresh data" is pressed
+    "crm_id_field": "",             # the id is also sent under this name (e.g. applicant_id); always as contact_id
     "sip_domain": "",               # PBX domain for extensions: 1234 -> sip:1234@sip_domain
-    "webhook_token": "",            # required on incoming CRM webhooks
     # Incoming calls: the agent registers this extension on the PBX and
     # answers every call to it (see app/services/inbound.py).
     "inbound": {},
@@ -139,11 +139,8 @@ def load_settings() -> dict:
         data = store.get_doc("telephony") or {}
     except Exception as e:
         logger.warning(f"Could not read telephony settings: {e}")
-    settings = {**DEFAULT_SETTINGS, **data}
-    if not settings.get("webhook_token"):
-        settings["webhook_token"] = secrets.token_urlsafe(24)
-        save_settings(settings)
-    return settings
+    data.pop("webhook_token", None)          # the old push-webhook token, no longer used
+    return {**DEFAULT_SETTINGS, **data}
 
 
 def save_settings(settings: dict) -> None:
@@ -163,8 +160,9 @@ def public_settings(settings: dict) -> dict:
         for f in PROVIDERS.get(pid, {}).get("fields", []):
             if f.get("secret") and creds.get(f["key"]):
                 creds[f["key"]] = _mask(creds[f["key"]])
-    if out.get("crm_api_key"):
-        out["crm_api_key"] = _mask(out["crm_api_key"])
+    for k in ("crm_api_key", "crm_result_key"):
+        if out.get(k):
+            out[k] = _mask(out[k])
     inbound = inbound_settings(out)
     if inbound.get("password"):
         inbound["password"] = _mask(inbound["password"])
@@ -181,8 +179,8 @@ def update_settings(changes: dict) -> dict:
     creds_in = changes.pop("credentials", None) or {}
     inbound_in = changes.pop("inbound", None)
     for key in DEFAULT_SETTINGS:
-        if key in changes and key not in ("credentials", "webhook_token", "inbound"):
-            if key == "crm_api_key" and str(changes[key] or "").startswith("•"):
+        if key in changes and key not in ("credentials", "inbound"):
+            if key in ("crm_api_key", "crm_result_key") and str(changes[key] or "").startswith("•"):
                 continue  # unchanged masked value
             settings[key] = changes[key].strip() if isinstance(changes[key], str) else changes[key]
     if isinstance(inbound_in, dict):
@@ -212,13 +210,6 @@ def update_settings(changes: dict) -> dict:
     settings["from_number"] = normalize_phone(settings.get("from_number") or "", settings["default_country_code"]) or (settings.get("from_number") or "").strip()
     save_settings(settings)
     return settings
-
-
-def regenerate_webhook_token() -> str:
-    settings = load_settings()
-    settings["webhook_token"] = secrets.token_urlsafe(24)
-    save_settings(settings)
-    return settings["webhook_token"]
 
 
 def missing_settings(settings: dict) -> list:

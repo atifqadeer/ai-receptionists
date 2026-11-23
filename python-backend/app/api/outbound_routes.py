@@ -2,12 +2,11 @@
 Routes for VoIP settings, outbound job calls and the provider voice webhooks.
 
   /api/telephony/...   VoIP provider settings (Agent Setup > VoIP & Calling)
-  /api/outbound/...    applicants queue, CRM webhook, CSV upload/template
+  /api/outbound/...    applicants queue, CRM fetch + status back, CSV upload/template
   /webhooks/voice/...  called by the VoIP provider during a call
 """
 
 import asyncio
-import hmac
 import json
 import re
 from typing import Optional
@@ -130,11 +129,6 @@ async def test_telephony():
     return await telephony.test_connection(telephony.load_settings())
 
 
-@telephony_router.post("/webhook-token")
-async def new_webhook_token():
-    return {"webhook_token": telephony.regenerate_webhook_token()}
-
-
 # ---- applicants and calls ----
 
 @outbound_router.get("/calls")
@@ -147,47 +141,20 @@ async def list_outbound_calls():
         "configured": telephony.is_configured(s),
         "missing": telephony.missing_settings(s),
         "within_calling_hours": telephony.within_calling_hours(s),
-        "webhook_token": s.get("webhook_token"),
     }
 
 
-@outbound_router.post("/webhook")
-async def crm_webhook(request: Request, token: Optional[str] = None):
-    """Your CRM posts applicants here. Accepts one applicant object, a list,
-    or {"applicants": [...]} / {"data": [...]}. Authenticate with the
-    X-Webhook-Token header or ?token=..."""
-    expected = telephony.load_settings().get("webhook_token") or ""
-    given = request.headers.get("x-webhook-token") or token or ""
-    if not given or not expected or not hmac.compare_digest(given.encode(), expected.encode()):
-        raise HTTPException(status_code=401, detail="Invalid or missing webhook token")
-    raw = await request.body()
-    body = None
-    if "form" not in (request.headers.get("content-type") or ""):
-        # JSON; some CRMs send Windows-1252 text (e.g. "£") instead of UTF-8.
-        for enc in ("utf-8-sig", "cp1252"):
-            try:
-                body = json.loads(raw.decode(enc))
-                break
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-    if body is None:
-        form = await request.form()
-        body = dict(form)
-        if not body:
-            raise HTTPException(status_code=400, detail="Body is not valid JSON or form data")
-    if isinstance(body, dict):
-        items = body.get("applicants") or body.get("data") or body.get("records") or [body]
-    elif isinstance(body, list):
-        items = body
-    else:
-        raise HTTPException(status_code=400, detail="Expected a JSON object or list")
-    records = [outbound.normalize_record(r) for r in items if isinstance(r, dict)]
-    return await outbound.add_records(records, source="webhook")
+@outbound_router.post("/crm/resend")
+async def crm_resend():
+    """Send the call statuses the CRM did not accept again, now."""
+    if not (telephony.load_settings().get("result_webhook_url") or "").strip():
+        raise HTTPException(status_code=400, detail="Set the status API URL first.")
+    return {**await outbound.resend_results(force=True), "status": outbound.crm_status()}
 
 
 @outbound_router.post("/crm/pull")
 async def crm_pull():
-    """Fetch applicants from the CRM API now and queue the new ones."""
+    """Fetch contacts from the CRM API now and queue the new ones."""
     try:
         return await outbound.pull_from_crm()
     except ValueError as e:
@@ -239,7 +206,7 @@ async def upload_csv(file: UploadFile = File(...)):
 @outbound_router.get("/template.csv")
 async def csv_template():
     return PlainTextResponse(outbound.template_csv(), media_type="text/csv",
-                             headers={"Content-Disposition": 'attachment; filename="applicants_template.csv"'})
+                             headers={"Content-Disposition": 'attachment; filename="contacts_template.csv"'})
 
 
 @outbound_router.post("/calls/{call_id}/dial")
@@ -276,6 +243,15 @@ async def cancel_call(call_id: str):
     if call["status"] not in ("queued",):
         raise HTTPException(status_code=400, detail="Only queued calls can be cancelled")
     return await outbound.update_call(call_id, status="cancelled", dial_requested=False)
+
+
+@outbound_router.post("/calls/delete")
+async def delete_outbound_calls(data: dict):
+    """Remove several contacts at once: {"ids": [...]}."""
+    ids = data.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Select at least one contact.")
+    return await outbound.delete_calls(ids)
 
 
 @outbound_router.delete("/calls/{call_id}")

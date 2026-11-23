@@ -33,6 +33,14 @@ export default function SystemStatus() {
   const [offline, setOffline] = useState(false);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(false);
+  // Open or closed is remembered in this browser (closed by default).
+  const [open, setOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('dashboard-status-open') === '1'; } catch { return false; }
+  });
+  const toggle = () => setOpen((o) => {
+    try { localStorage.setItem('dashboard-status-open', o ? '0' : '1'); } catch { /* storage blocked */ }
+    return !o;
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -111,22 +119,38 @@ export default function SystemStatus() {
   const warnings = (tiles || []).filter((t) => t.state === 'warn').length;
 
   return (
-    <div className="bg-gray-900 rounded-xl border border-gray-800 p-6">
-      <div className="flex items-center gap-3 mb-4 flex-wrap">
-        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-          <i className={`fa-solid ${offline || problems ? 'fa-circle-exclamation text-red-400' : warnings ? 'fa-circle-info text-amber-400' : 'fa-circle-check text-emerald-400'}`}></i>
-          System Status
-        </h3>
-        {tiles && !offline && (
-          <span className="text-xs text-gray-400">
-            {problems ? `${problems} need${problems === 1 ? 's' : ''} attention` : warnings ? `${warnings} using a fallback` : 'Everything is working'}
-          </span>
-        )}
-        <button onClick={load} disabled={loading} className="ml-auto text-xs px-3 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50">
+    <div className="bg-gray-900 rounded-xl border border-gray-800">
+      <div className="flex items-center gap-3 px-6 py-4 flex-wrap">
+        <button type="button" onClick={toggle} aria-expanded={open} aria-controls="system-status-body"
+          className="flex items-center gap-3 flex-wrap text-left flex-1 min-w-0 group">
+          <i className={`fa-solid fa-chevron-right text-xs text-gray-500 group-hover:text-gray-300 transition-transform ${open ? 'rotate-90' : ''}`}></i>
+          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+            <i className={`fa-solid ${offline || problems ? 'fa-circle-exclamation text-red-400' : warnings ? 'fa-circle-info text-amber-400' : 'fa-circle-check text-emerald-400'}`}></i>
+            System Status
+          </h3>
+          {offline ? (
+            <span className="text-xs text-red-300">Backend not running</span>
+          ) : tiles && (
+            <span className="text-xs text-gray-400">
+              {problems ? `${problems} need${problems === 1 ? 's' : ''} attention` : warnings ? `${warnings} using a fallback` : 'Everything is working'}
+            </span>
+          )}
+          {/* Closed: one icon per service, coloured by its state */}
+          {!open && tiles && !offline && (
+            <span className="flex items-center gap-2.5 ml-1">
+              {tiles.map((t) => (
+                <i key={t.name} className={`fa-solid ${t.icon} text-xs ${STYLE[t.state].icon}`} title={`${t.name}: ${t.label}`}></i>
+              ))}
+            </span>
+          )}
+        </button>
+        <button onClick={load} disabled={loading} className="text-xs px-3 py-1.5 rounded-lg border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50">
           <i className={`fa-solid fa-rotate mr-1.5 ${loading ? 'fa-spin' : ''}`}></i>Refresh
         </button>
       </div>
 
+      {open && (
+      <div id="system-status-body" className="px-6 pb-6">
       {offline ? (
         <div className="text-sm text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg px-4 py-3">
           <i className="fa-solid fa-plug-circle-xmark mr-2"></i>The backend at {API_BASE} is not running. Start it with start-app.bat.
@@ -152,6 +176,8 @@ export default function SystemStatus() {
         </div>
       )}
       {checkedAt && <p className="text-[11px] text-gray-600 mt-3">Checked {checkedAt.toLocaleTimeString()}</p>}
+      </div>
+      )}
     </div>
   );
 }

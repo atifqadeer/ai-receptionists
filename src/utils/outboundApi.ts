@@ -30,9 +30,10 @@ export interface TelephonySettings {
   result_webhook_url: string;
   crm_api_url: string;
   crm_api_key: string;
+  crm_result_key?: string;
   crm_poll_minutes: number;
+  crm_id_field?: string;
   sip_domain: string;
-  webhook_token: string;
   inbound: InboundSettings;
   providers: Record<string, { name: string; fields: ProviderField[] }>;
   configured: boolean;
@@ -115,6 +116,7 @@ export interface CallNote {
 export interface OutboundCall {
   id: string;
   source: string;
+  batch?: string;
   applicant: { applicant_id?: string; first_name?: string; last_name?: string; phone: string; email?: string };
   job: Record<string, string>;
   status: string;
@@ -136,7 +138,6 @@ export interface CallsResponse {
   configured: boolean;
   missing: string[];
   within_calling_hours: boolean;
-  webhook_token: string;
 }
 
 // A backend that accepts the connection but never answers (frozen or
@@ -169,7 +170,6 @@ export const telephonyApi = {
   get: () => call<TelephonySettings>('/api/telephony/settings'),
   save: (s: Partial<TelephonySettings>) => call<TelephonySettings>('/api/telephony/settings', { method: 'PUT', body: JSON.stringify(s) }),
   test: () => call<{ ok: boolean; message: string }>('/api/telephony/test', { method: 'POST' }),
-  newToken: () => call<{ webhook_token: string }>('/api/telephony/webhook-token', { method: 'POST' }),
   inbound: () => call<{ status: InboundStatus; calls: InboundCall[]; stats: InboundStats }>('/api/telephony/inbound'),
   clearInbound: () => call('/api/telephony/inbound/calls', { method: 'DELETE' }),
   inboundCall: (id: string) => call<InboundCallDetail>(`/api/telephony/inbound/calls/${id}`),
@@ -189,9 +189,19 @@ export interface CrmPull {
   fetched?: number;
   added?: number;
   already_imported?: number;
+  already_called?: number;
+  ids?: string[];
   rejected?: Array<{ row: number; reason: string; name: string }>;
   error?: string;
 }
+
+export interface CrmResultsStatus {
+  url: string;
+  sent: number;
+  unsent: number;
+  last: { at: string; call_id: string; ok: boolean; error: string | null; status: string; outcome: string | null; name: string } | null;
+}
+export interface CrmStatus { last: CrmPull | null; imported_total: number; results: CrmResultsStatus }
 
 export interface DncEntry {
   number: string;
@@ -210,7 +220,8 @@ export const dncApi = {
 
 export const outboundApi = {
   crmPull: () => call<CrmPull>('/api/outbound/crm/pull', { method: 'POST' }),
-  crmStatus: () => call<{ last: CrmPull | null; imported_total: number }>('/api/outbound/crm/status'),
+  crmStatus: () => call<CrmStatus>('/api/outbound/crm/status'),
+  crmResend: () => call<{ tried: number; sent: number; failed: number; status: CrmStatus }>('/api/outbound/crm/resend', { method: 'POST' }),
   list: () => call<CallsResponse>('/api/outbound/calls'),
   uploadCsv: (file: File) => {
     const form = new FormData();
@@ -222,8 +233,8 @@ export const outboundApi = {
   dialAll: () => call<{ requested: number }>('/api/outbound/dial-all', { method: 'POST' }),
   cancel: (id: string) => call<OutboundCall>(`/api/outbound/calls/${id}/cancel`, { method: 'POST' }),
   remove: (id: string) => call(`/api/outbound/calls/${id}`, { method: 'DELETE' }),
+  removeMany: (ids: string[]) => call<{ removed: number; kept_in_progress: number }>('/api/outbound/calls/delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   preview: (id: string, body: { reset?: boolean; message?: string }) =>
     call<{ reply: string; ended: boolean; outcome: string | null }>(`/api/outbound/calls/${id}/preview`, { method: 'POST', body: JSON.stringify(body) }),
   templateUrl: `${API_BASE}/api/outbound/template.csv`,
-  webhookUrl: `${API_BASE}/api/outbound/webhook`,
 };

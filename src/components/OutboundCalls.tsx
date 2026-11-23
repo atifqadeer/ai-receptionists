@@ -1,11 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
-import { outboundApi, CallsResponse, OutboundCall, CallNote } from '../utils/outboundApi';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { outboundApi, CallsResponse, OutboundCall, CallNote, CrmStatus } from '../utils/outboundApi';
 import { STATUS_STYLE, OUTCOME_STYLE, statusLabel, outcomeLabel } from '../utils/callStatus';
 
-// Job Calls: applicants from your CRM (webhook or API fetch, set up in
-// Settings > Calling > Webhooks) or a CSV are called by the AI agent
+// Job Calls: contacts from your CRM (fetched from its API, set up in
+// Settings > Webhooks) or a CSV are called by the AI agent
 // about a matching job. Calls run through the VoIP provider set in
 // Settings > Calling.
+
+// Which import a row came from: its batch tag, or (rows imported before
+// batches existed) its source and the minute it was added.
+const batchOf = (c: OutboundCall) => c.batch || `${c.source}|${(c.created_at || '').slice(0, 16)}`;
+const PAGE = 100;
+const LIVE = ['dialing', 'ringing', 'in_progress'];
 
 export default function OutboundCalls() {
   const [data, setData] = useState<CallsResponse | null>(null);
@@ -15,6 +21,72 @@ export default function OutboundCalls() {
   const [transcriptOf, setTranscriptOf] = useState<OutboundCall | null>(null);
   const [previewOf, setPreviewOf] = useState<OutboundCall | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [crm, setCrm] = useState<CrmStatus | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [fresh, setFresh] = useState<Set<string>>(new Set());   // rows the last Refresh data added
+  const loadCrm = () => outboundApi.crmStatus().then(setCrm).catch(() => {});
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [show, setShow] = useState('all');          // 'all', 'last' or a batch key
+  const [page, setPage] = useState(0);
+  const [removing, setRemoving] = useState(false);
+
+  // Imports (fetches / CSV uploads), newest first, with their row counts.
+  const batches = useMemo(() => {
+    const m = new Map<string, { key: string; source: string; at: string; count: number }>();
+    for (const c of data?.calls || []) {
+      const k = batchOf(c);
+      const b = m.get(k) || { key: k, source: c.source, at: c.created_at, count: 0 };
+      b.count += 1;
+      if (c.created_at < b.at) b.at = c.created_at;
+      m.set(k, b);
+    }
+    return [...m.values()].sort((a, b) => (a.at < b.at ? 1 : -1));
+  }, [data]);
+  const lastFetch = batches.find((b) => b.source === 'crm');
+  // A chosen import that no longer exists (its rows were removed) falls back to all.
+  const view = show === 'all' || (show === 'last' ? lastFetch : batches.some((b) => b.key === show)) ? show : 'all';
+  const shown = useMemo(() => {
+    const calls = data?.calls || [];
+    if (view === 'all') return calls;
+    const key = view === 'last' ? lastFetch?.key : view;
+    return calls.filter((c) => batchOf(c) === key);
+  }, [data, view, lastFetch]);
+  const pages = Math.max(1, Math.ceil(shown.length / PAGE));
+  const pageRows = shown.slice(page * PAGE, page * PAGE + PAGE);
+  const selectable = shown.filter((c) => !LIVE.includes(c.status));
+  const allSelected = selectable.length > 0 && selectable.every((c) => selected.has(c.id));
+
+  // Drop selections whose rows are gone (removed elsewhere, or filtered out of the list).
+  useEffect(() => {
+    const ids = new Set((data?.calls || []).map((c) => c.id));
+    setSelected((cur) => (([...cur].every((id) => ids.has(id))) ? cur : new Set([...cur].filter((id) => ids.has(id)))));
+  }, [data]);
+  useEffect(() => { setPage(0); }, [show]);
+
+  const toggle = (id: string) => setSelected((cur) => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(selectable.map((c) => c.id)));
+
+  const removeSelected = async () => {
+    const n = selected.size;
+    if (!n || !window.confirm(`Remove ${n} selected contact${n === 1 ? '' : 's'} and their call records? This cannot be undone.`)) return;
+    setRemoving(true);
+    setNotice(null);
+    try {
+      const r = await outboundApi.removeMany([...selected]);
+      setSelected(new Set());
+      setNotice({ ok: true, text: `${r.removed} contact${r.removed === 1 ? '' : 's'} removed`
+        + `${r.kept_in_progress ? `; ${r.kept_in_progress} kept because the call is in progress` : ''}.` });
+    } catch (e: any) {
+      setNotice({ ok: false, text: e.message });
+    } finally {
+      setRemoving(false);
+      refresh();
+    }
+  };
 
   const refresh = () =>
     outboundApi.list().then((d) => { setData(d); setError(''); })
@@ -22,9 +94,35 @@ export default function OutboundCalls() {
 
   useEffect(() => {
     refresh();
+    loadCrm();
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, []);
+
+  // Refresh data: fetch contacts from the CRM now, then reload the list.
+  const refreshData = async () => {
+    setPulling(true);
+    setNotice(null);
+    try {
+      const r = await outboundApi.crmPull();
+      await refresh();
+      const added = r.ids || [];
+      setFresh(new Set(added));
+      if (added.length) { setShow('last'); setTimeout(() => setFresh(new Set()), 8000); }
+      setNotice({ ok: true, text: r.added
+        ? `Data refreshed: ${r.added} new contact${r.added === 1 ? '' : 's'} added to the list (highlighted)`
+          + `${r.already_imported ? `, ${r.already_imported} already here` : ''}${r.already_called ? `, ${r.already_called} already called (not queued again)` : ''}`
+          + `${r.rejected?.length ? `, ${r.rejected.length} rejected` : ''}.`
+        : `Data refreshed: no new contacts (${r.fetched} fetched, ${r.already_imported} already here`
+          + `${r.already_called ? `, ${r.already_called} already called` : ''}).` });
+    } catch (e: any) {
+      setNotice({ ok: false, text: e.message || 'Could not fetch from your CRM.' });
+      refresh();
+    } finally {
+      setPulling(false);
+      loadCrm();
+    }
+  };
 
   const act = async (fn: () => Promise<any>, ok?: string) => {
     setNotice(null);
@@ -43,7 +141,7 @@ export default function OutboundCalls() {
     setNotice(null);
     try {
       const r = await outboundApi.uploadCsv(file);
-      const parts = [`${r.added} applicant${r.added === 1 ? '' : 's'} added`];
+      const parts = [`${r.added} contact${r.added === 1 ? '' : 's'} added`];
       if (r.skipped.length) parts.push(`${r.skipped.length} already queued`);
       if (r.rejected.length) parts.push(`${r.rejected.length} rejected (${r.rejected.slice(0, 3).map((x) => `row ${x.row}: ${x.reason}`).join('; ')})`);
       setNotice({ ok: r.rejected.length === 0, text: parts.join(', ') + '.' });
@@ -82,11 +180,11 @@ export default function OutboundCalls() {
         </span>
         {data.call_mode === 'auto' && data.configured && (
           <span className="text-xs text-gray-400">
-            {data.within_calling_hours ? 'Within calling hours: queued applicants are being called.' : 'Outside calling hours: calls wait until the next calling window.'}
+            {data.within_calling_hours ? 'Within calling hours: queued contacts are being called.' : 'Outside calling hours: calls wait until the next calling window.'}
           </span>
         )}
         <span className="text-xs text-gray-500">Change these in Settings › Calling.</span>
-        <button onClick={() => act(outboundApi.dialAll, 'Calling all queued applicants.')} disabled={!queued || !data.configured}
+        <button onClick={() => act(outboundApi.dialAll, 'Calling all queued contacts.')} disabled={!queued || !data.configured}
           className="ml-auto px-4 py-2 rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 text-white text-sm font-medium disabled:opacity-40 flex items-center gap-2">
           <i className="fa-solid fa-phone"></i>Call all queued ({queued})
         </button>
@@ -99,22 +197,44 @@ export default function OutboundCalls() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Where applicants come from */}
+        {/* Where contacts come from */}
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4 flex flex-col">
-          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-            <i className="fa-solid fa-link text-violet-400"></i>From your CRM
-          </h3>
+          <div className="flex items-start gap-3">
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2 flex-1">
+              <i className="fa-solid fa-link text-violet-400"></i>From your CRM
+            </h3>
+            <button onClick={refreshData} disabled={pulling}
+              className="px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium hover:bg-violet-700 disabled:opacity-40 flex items-center gap-2 shrink-0">
+              <i className={`fa-solid fa-rotate ${pulling ? 'fa-spin' : ''}`}></i>{pulling ? 'Refreshing…' : 'Refresh data'}
+            </button>
+          </div>
           <p className="text-sm text-gray-400">
-            Applicants your CRM sends to the webhook, or that the agent fetches from your CRM's API, are queued here automatically.
+            Contacts are fetched from your CRM's API and queued here; the status of each finished call is sent back to it. Anyone the agent has already called is not queued again (Settings › GuardRails).
+            Refresh data fetches the latest now.
           </p>
+          <div className="text-xs rounded-lg bg-gray-800/40 border border-gray-700/60 px-3 py-2.5">
+            {!crm?.last ? <span className="text-gray-500">Not fetched yet.</span> : crm.last.error ? (
+              <span className="text-red-300"><i className="fa-solid fa-circle-xmark mr-1.5"></i>Last refresh {new Date(crm.last.at).toLocaleString()} failed: {crm.last.error}</span>
+            ) : (
+              <span className="text-gray-300">
+                <i className="fa-solid fa-circle-check text-emerald-400 mr-1.5"></i>Last refresh {new Date(crm.last.at).toLocaleString()}:{' '}
+                {crm.last.fetched} fetched, {crm.last.added} new, {crm.last.already_imported} already here
+                {crm.last.already_called ? `, ${crm.last.already_called} already called` : ''}
+              </span>
+            )}
+          </div>
           <ul className="text-sm text-gray-300 space-y-2.5">
             <li className="flex gap-2">
-              <i className="fa-solid fa-link text-violet-400 mt-1 text-xs w-4"></i>
-              <span>Receive applicants by webhook, and send call results back<span className="block text-xs text-gray-500">Settings › Calling › Webhooks</span></span>
+              <i className="fa-solid fa-cloud-arrow-down text-violet-400 mt-1 text-xs w-4"></i>
+              <span>Fetch URL, API key and automatic refresh<span className="block text-xs text-gray-500">Settings › Webhooks</span></span>
             </li>
             <li className="flex gap-2">
-              <i className="fa-solid fa-cloud-arrow-down text-violet-400 mt-1 text-xs w-4"></i>
-              <span>Fetch applicants from your CRM's API<span className="block text-xs text-gray-500">Settings › Calling › Webhooks</span></span>
+              <i className="fa-solid fa-paper-plane text-violet-400 mt-1 text-xs w-4"></i>
+              <span>
+                Call statuses sent back: {crm?.results.sent ?? 0} accepted
+                {crm?.results.unsent ? <span className="text-amber-300">, {crm.results.unsent} waiting to resend</span> : ''}
+                <span className="block text-xs text-gray-500">Settings › Webhooks</span>
+              </span>
             </li>
           </ul>
         </div>
@@ -122,9 +242,9 @@ export default function OutboundCalls() {
         {/* CSV */}
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
           <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-            <i className="fa-solid fa-file-csv text-violet-400"></i>Upload Applicants (CSV)
+            <i className="fa-solid fa-file-csv text-violet-400"></i>Upload Contacts (CSV)
           </h3>
-          <p className="text-sm text-gray-400">One row per applicant with the job to offer them: name, phone, job title, salary, benefits, qualifications, experience and more.</p>
+          <p className="text-sm text-gray-400">One row per contact with the job to offer them: name, phone, job title, salary, benefits, qualifications, experience and more.</p>
           <a href={outboundApi.templateUrl} className="inline-flex items-center gap-2 text-sm text-violet-300 hover:text-violet-200">
             <i className="fa-solid fa-download"></i>Download the CSV template
           </a>
@@ -147,18 +267,42 @@ export default function OutboundCalls() {
 
       {/* Calls */}
       <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-800 flex items-center gap-2">
-          <h3 className="text-lg font-semibold text-white">Applicants & Calls</h3>
-          <span className="text-xs text-gray-500">({data.calls.length})</span>
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center gap-3 flex-wrap">
+          <h3 className="text-lg font-semibold text-white">Contacts & Calls</h3>
+          <span className="text-xs text-gray-500">({shown.length}{view !== 'all' ? ` of ${data.calls.length}` : ''})</span>
+          <select value={view} onChange={(e) => setShow(e.target.value || 'all')}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 max-w-[280px]">
+            <option value="all">All contacts</option>
+            {lastFetch && <option value="last">Last fetch from CRM ({lastFetch.count}, {new Date(lastFetch.at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })})</option>}
+            {batches.map((b) => (
+              <option key={b.key} value={b.key}>
+                {b.source === 'crm' ? 'CRM fetch' : b.source.startsWith('csv') ? 'CSV upload' : b.source} · {new Date(b.at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} ({b.count})
+              </option>
+            ))}
+          </select>
+          <div className="ml-auto flex items-center gap-2">
+            {selected.size > 0 && (
+              <button onClick={() => setSelected(new Set())} className="text-xs text-gray-400 hover:text-gray-200">Clear selection</button>
+            )}
+            <button onClick={removeSelected} disabled={!selected.size || removing}
+              className="px-3 py-1.5 rounded-lg border border-red-500/40 text-red-300 text-xs hover:bg-red-500/10 disabled:opacity-40 flex items-center gap-1.5">
+              <i className={`fa-solid ${removing ? 'fa-spinner fa-spin' : 'fa-trash'}`}></i>Remove selected ({selected.size})
+            </button>
+          </div>
         </div>
-        {data.calls.length === 0 ? (
-          <div className="p-10 text-center text-gray-500 text-sm">No applicants yet. Upload a CSV or send one from your CRM webhook.</div>
-        ) : (
+        {shown.length === 0 ? (
+          <div className="p-10 text-center text-gray-500 text-sm">No contacts yet. Click Refresh data to fetch them from your CRM, or upload a CSV.</div>
+        ) : (<>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-xs text-gray-400 uppercase bg-gray-800/40">
                 <tr>
-                  <th className="text-left px-4 py-3">Applicant</th>
+                  <th className="pl-4 py-3 w-8">
+                    <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={!selectable.length}
+                      title={allSelected ? 'Unselect all' : `Select all ${selectable.length}${view === 'all' ? '' : ' in this view'}`}
+                      className="w-4 h-4 accent-violet-500 cursor-pointer" aria-label="Select all" />
+                  </th>
+                  <th className="text-left px-4 py-3">Contact</th>
                   <th className="text-left px-4 py-3">Job</th>
                   <th className="text-left px-4 py-3">Status</th>
                   <th className="text-left px-4 py-3">Outcome</th>
@@ -167,8 +311,13 @@ export default function OutboundCalls() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
-                {data.calls.map((c) => (
-                  <tr key={c.id} className="hover:bg-gray-800/30">
+                {pageRows.map((c) => (
+                  <tr key={c.id} className={`transition-colors duration-700 ${fresh.has(c.id) ? 'bg-violet-500/15' : selected.has(c.id) ? 'bg-violet-500/5' : 'hover:bg-gray-800/30'}`}>
+                    <td className="pl-4 py-3">
+                      <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} disabled={LIVE.includes(c.status)}
+                        title={LIVE.includes(c.status) ? 'Call in progress' : 'Select'} className="w-4 h-4 accent-violet-500 cursor-pointer disabled:opacity-30"
+                        aria-label={`Select ${c.applicant.first_name || c.applicant.phone}`} />
+                    </td>
                     <td className="px-4 py-3">
                       <div className="text-white">{`${c.applicant.first_name || ''} ${c.applicant.last_name || ''}`.trim() || '—'}</div>
                       <div className="text-xs text-gray-400">{c.applicant.phone}</div>
@@ -214,7 +363,7 @@ export default function OutboundCalls() {
                             <i className="fa-solid fa-ban"></i>
                           </button>
                         )}
-                        <button onClick={() => window.confirm('Delete this applicant and call record?') && act(() => outboundApi.remove(c.id))}
+                        <button onClick={() => window.confirm('Delete this contact and call record?') && act(() => outboundApi.remove(c.id))}
                           className="px-2 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:bg-red-500/10 hover:text-red-300 text-xs" title="Delete">
                           <i className="fa-solid fa-trash"></i>
                         </button>
@@ -225,7 +374,19 @@ export default function OutboundCalls() {
               </tbody>
             </table>
           </div>
-        )}
+          {pages > 1 && (
+            <div className="px-6 py-3 border-t border-gray-800 flex items-center gap-3 text-xs text-gray-400">
+              <span>{page * PAGE + 1}–{Math.min(shown.length, page * PAGE + PAGE)} of {shown.length}</span>
+              <div className="ml-auto flex items-center gap-1">
+                <button onClick={() => setPage(0)} disabled={page === 0} className="px-2 py-1 rounded border border-gray-700 disabled:opacity-30" aria-label="First page"><i className="fa-solid fa-angles-left"></i></button>
+                <button onClick={() => setPage(page - 1)} disabled={page === 0} className="px-2 py-1 rounded border border-gray-700 disabled:opacity-30" aria-label="Previous page"><i className="fa-solid fa-angle-left"></i></button>
+                <span className="px-2">Page {page + 1} of {pages}</span>
+                <button onClick={() => setPage(page + 1)} disabled={page >= pages - 1} className="px-2 py-1 rounded border border-gray-700 disabled:opacity-30" aria-label="Next page"><i className="fa-solid fa-angle-right"></i></button>
+                <button onClick={() => setPage(pages - 1)} disabled={page >= pages - 1} className="px-2 py-1 rounded border border-gray-700 disabled:opacity-30" aria-label="Last page"><i className="fa-solid fa-angles-right"></i></button>
+              </div>
+            </div>
+          )}
+        </>)}
       </div>
 
       {transcriptOf && (
@@ -270,14 +431,14 @@ const NOTE_KIND: Record<CallNote['kind'], { label: string; style: string }> = {
   unclear: { label: 'Unclear, asked to repeat', style: 'bg-orange-500/15 text-orange-300' },
 };
 
-// What the applicant said during the call, one note per response.
+// What the contact said during the call, one note per response.
 function CallNotes({ notes }: { notes: CallNote[] }) {
   if (notes.length === 0) {
-    return <div className="px-5 pt-5 text-sm text-gray-500">No notes yet: the applicant hasn't said anything on this call.</div>;
+    return <div className="px-5 pt-5 text-sm text-gray-500">No notes yet: the contact hasn't said anything on this call.</div>;
   }
   return (
     <div className="p-5 space-y-2">
-      <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Applicant's responses</div>
+      <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Contact's responses</div>
       {notes.map((n, i) => {
         const kind = NOTE_KIND[n.kind] || NOTE_KIND.response;
         return (
@@ -303,7 +464,7 @@ function Bubbles({ lines }: { lines: Array<{ role: string; text: string; interru
         <div key={i} className={`flex ${t.role === 'agent' ? 'justify-start' : 'justify-end'}`}>
           <div className={`max-w-[80%] rounded-xl px-4 py-2.5 text-sm ${t.role === 'agent' ? 'bg-gray-800 text-gray-200' : 'bg-violet-600/80 text-white'}`}>
             <div className="text-[10px] uppercase tracking-wide opacity-60 mb-0.5">
-              {t.role === 'agent' ? 'AI agent' : 'Applicant'}
+              {t.role === 'agent' ? 'AI agent' : 'Contact'}
               {t.interrupted && (t.role === 'agent' ? ' · cut off' : ' · interrupted')}
             </div>
             {t.text}
@@ -345,7 +506,7 @@ function ScriptPreview({ call, onClose }: { call: OutboundCall; onClose: () => v
       <Bubbles lines={lines} />
       <div className="px-5 py-3 border-t border-gray-800 space-y-2">
         <div className="text-xs text-gray-400 flex items-center gap-2">
-          Reply as the applicant (e.g. "what's the salary?", "yes I'm interested", "call me later").
+          Reply as the contact (e.g. "what's the salary?", "yes I'm interested", "call me later").
           {outcome && <span className={`ml-auto px-2 py-0.5 rounded-full ${OUTCOME_STYLE[outcome] || OUTCOME_STYLE.unknown}`}>{outcomeLabel(outcome)}</span>}
         </div>
         {ended ? (
@@ -353,7 +514,7 @@ function ScriptPreview({ call, onClose }: { call: OutboundCall; onClose: () => v
         ) : (
           <div className="flex gap-2">
             <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && send()}
-              placeholder="Type the applicant's reply…" autoFocus
+              placeholder="Type the contact's reply…" autoFocus
               className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white focus:border-violet-500 outline-none" />
             <button onClick={send} className="px-4 rounded-lg bg-violet-600 text-white text-sm"><i className="fa-solid fa-paper-plane"></i></button>
           </div>

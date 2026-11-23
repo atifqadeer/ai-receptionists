@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import ApiKeysGuide from './ApiKeysGuide';
 import Integrations from './Integrations';
 import AiModelSettings from './AiModelSettings';
 import { useLocalStorage } from '../hooks/useLocalStorage';
@@ -25,7 +24,6 @@ export default function Settings({ section }: { section?: string } = {}) {
     { id: 'general', label: 'General', icon: 'fa-cog' },
     { id: 'integrations', label: 'Integrations', icon: 'fa-plug' },
     { id: 'ai', label: 'AI Model', icon: 'fa-brain' },
-    { id: 'api', label: 'API Keys Guide', icon: 'fa-key' },
   ];
 
   return (
@@ -134,7 +132,6 @@ export default function Settings({ section }: { section?: string } = {}) {
           {activeSection === 'ai' && <AiModelSettings />}
 
           {/* API Keys */}
-          {activeSection === 'api' && <ApiKeysGuide />}
         </div>
       </div>
     </div>

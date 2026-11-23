@@ -49,17 +49,17 @@ FIELDS = [
     "job_description", "notes",
 ]
 # CSV template: (column header, field). "Office" is the employer and
-# "Branch" the job's location; "Applicant Name" is split into first and
-# last name when read.
+# "Branch" the job's location; "Name" is split into first and
+# last name when read; "ID" is the applicant's id in your CRM.
 TEMPLATE = [
-    ("Applicant Name", "name"), ("Phone", "phone"), ("Email", "email"),
+    ("ID", "applicant_id"), ("Name", "name"), ("Phone", "phone"), ("Email", "email"),
     ("Job Title", "job_title"), ("Office", "employer"), ("Branch", "location"),
     ("Salary", "salary"), ("Benefits", "benefits"), ("Qualifications", "qualifications"),
     ("Experience", "experience"), ("Job Type", "job_type"), ("Working Hours", "working_hours"),
     ("Job Description", "job_description"),
 ]
 TEMPLATE_EXAMPLE = [
-    "Sarah Jones", "07700 900123", "sarah@example.com",
+    "12345", "Sarah Jones", "07700 900123", "sarah@example.com",
     "Registered Nurse (RGN)", "Oakwood Care Home", "Manchester",
     "£38,000 per year", "28 days holiday, pension, paid training", "Active NMC registration and PIN",
     "At least 2 years in elderly care", "Full-time, permanent", "Day shifts, 37.5 hours a week",
@@ -73,7 +73,7 @@ _ALIASES = {
     "name": ["full_name", "fullname", "applicant_name", "candidate_name", "contact_name"],
     "phone": ["phone_number", "mobile", "mobile_number", "telephone", "tel", "contact_number", "cell"],
     "email": ["email_address", "mail"],
-    "applicant_id": ["candidate_id", "contact_id", "lead_id"],
+    "applicant_id": ["candidate_id", "contact_id", "lead_id", "id"],
     "job_id": ["vacancy_id", "position_id"],
     "job_title": ["title", "position", "role", "vacancy", "job", "job_name", "vacancy_title"],
     "employer": ["office", "office_name", "company", "client", "employer_name", "company_name", "client_name"],
@@ -84,8 +84,8 @@ _ALIASES = {
     "experience": ["required_experience", "experience_required", "years_experience"],
     "job_type": ["employment_type", "employmenttype", "contract_type", "contracttype", "contract", "type"],
     "working_hours": ["hours", "workinghours", "shift", "shifts", "schedule", "working_pattern"],
-    "start_date": ["start", "startdate", "available_from", "availablefrom"],
     "job_description": ["description", "jobdescription", "duties", "responsibilities", "summary", "job_summary"],
+    "start_date": ["start", "startdate", "available_from", "availablefrom"],
 }
 
 _FINAL = {"completed", "no_answer", "busy", "failed", "cancelled",
@@ -187,6 +187,7 @@ async def add_records(records: list, source: str) -> dict:
     job, or same phone and job title) is skipped."""
     settings = telephony.load_settings()
     added, skipped, rejected = [], [], []
+    batch = f"{source}|{_now()}"
     async with _lock:
         calls = _load()
         for i, rec in enumerate(records, start=1):
@@ -199,6 +200,11 @@ async def add_records(records: list, source: str) -> dict:
                 rejected.append({"row": i, "reason": "on the Do Not Call list",
                                  "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip()})
                 continue
+            called = call_rules.called_before(call_rules.contact_keys(rec, rec, phone))
+            if called:
+                skipped.append({"row": i, "reason": "already called", "at": called,
+                                "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip()})
+                continue
             dup = next((c for c in calls if c["status"] not in _FINAL and (
                 (rec.get("applicant_id") and rec.get("job_id") and c["applicant"].get("applicant_id") == rec.get("applicant_id")
                  and c["job"].get("job_id") == rec.get("job_id"))
@@ -209,7 +215,9 @@ async def add_records(records: list, source: str) -> dict:
             call = {
                 "id": uuid.uuid4().hex,
                 "source": source,
-                "applicant": {k: rec.get(k, "") for k in ("applicant_id", "first_name", "last_name", "email", "notes")} | {"phone": phone},
+                "batch": batch,
+                "applicant": {k: rec.get(k, "") for k in ("applicant_id", "first_name", "last_name", "email", "notes")}
+                | {"phone": phone, "phone_original": str(rec.get("phone", "")).strip()},
                 "job": {k: rec.get(k, "") for k in FIELDS if k not in ("applicant_id", "first_name", "last_name", "phone", "email", "notes")},
                 "status": "queued",
                 "outcome": None,
@@ -244,8 +252,21 @@ def _crm_state() -> dict:
 
 
 def crm_status() -> dict:
+    """Both CRM APIs: the last fetch, and the status updates sent back."""
     st = _crm_state()
-    return {"last": st.get("last"), "imported_total": len(st.get("imported", []))}
+    calls = _load()
+    sent = [c for c in calls if c.get("result_sent") is True]
+    unsent = [c for c in calls if c.get("result_sent") is False]
+    return {
+        "last": st.get("last"),
+        "imported_total": sum(1 for c in calls if c.get("source") == "crm"),
+        "results": {
+            "url": (telephony.load_settings().get("result_webhook_url") or "").strip(),
+            "sent": len(sent),
+            "unsent": len(unsent),
+            "last": (store.get_doc("crm_results") or {}).get("last"),
+        },
+    }
 
 
 def _crm_items(body) -> list:
@@ -264,14 +285,116 @@ def _crm_items(body) -> list:
     return []
 
 
+def _crm_error(r) -> str:
+    """The portal's own reason for refusing, in one line."""
+    try:
+        body = r.json()
+        msg = body.get("message") or ""
+        errors = body.get("errors") or {}
+        if isinstance(errors, dict) and errors:
+            msg = "; ".join(str(v[0] if isinstance(v, list) and v else v) for v in errors.values())
+        if msg:
+            return msg[:300]
+    except Exception:
+        pass
+    return (r.text or "")[:200]
+
+
+def _next_page(body, page: int) -> Optional[int]:
+    """The next page number when the portal says there is more
+    (meta.has_more, or meta/top-level last_page > page)."""
+    if not isinstance(body, dict):
+        return None
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else body
+    if meta.get("has_more") is True:
+        return page + 1
+    last = meta.get("last_page")
+    if isinstance(last, int) and page < last:
+        return page + 1
+    return None
+
+
+async def _fetch_pages(url: str, headers: dict, max_pages: int = 20) -> list:
+    """GET the applicants, following the portal's pages (?page=2, ...)."""
+    items, page = [], 1
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            while True:
+                params = {"page": page} if page > 1 else None
+                r = await client.get(url, headers=headers, params=params)
+                if r.status_code in (401, 403):
+                    raise ValueError(f"The portal refused the API key ({r.status_code}): {_crm_error(r)}")
+                if r.status_code >= 400:
+                    raise ValueError(f"The portal answered {r.status_code}: {_crm_error(r)}")
+                try:
+                    body = r.json()
+                except json.JSONDecodeError as e:
+                    raise ValueError("The portal did not return JSON.") from e
+                items += _crm_items(body)
+                nxt = _next_page(body, page)
+                if not nxt or nxt > max_pages:
+                    return items
+                page = nxt
+    except httpx.HTTPError as e:
+        raise ValueError(f"Could not reach the portal at {url}: {e}") from e
+
+
+def _crm_ident(applicant: dict, job: dict, phone: str) -> str:
+    """Who + which job: applicant id + job id, or phone + job title."""
+    if applicant.get("applicant_id"):
+        return f"{applicant.get('applicant_id')}|{job.get('job_id', '')}"
+    return f"{phone}|{(job.get('job_title') or '').lower()}"
+
+
+async def _fill_missing_ids(items: list, cc: str) -> int:
+    """Job calls saved without the CRM's contact / job id (or the phone as
+    the CRM writes it, or the email) get them from a fetch with the same
+    phone and job title: they are needed to send the call status back."""
+    found = {}
+    for raw in items:
+        if isinstance(raw, dict):
+            rec = normalize_record(raw)
+            phone = telephony.normalize_phone(rec.get("phone", ""), cc)
+            if phone and rec.get("applicant_id"):
+                found[(phone, (rec.get("job_title") or "").lower())] = rec
+    if not found:
+        return 0
+    filled = 0
+    async with _lock:
+        calls = _load()
+        for c in calls:
+            rec = found.get((c["applicant"].get("phone"), (c["job"].get("job_title") or "").lower()))
+            if not rec:
+                continue
+            changed = False
+            if not c["applicant"].get("applicant_id"):
+                c["applicant"]["applicant_id"] = rec["applicant_id"]
+                changed = True
+            if rec.get("job_id") and not c["job"].get("job_id"):
+                c["job"]["job_id"] = rec["job_id"]
+                changed = True
+            if not c["applicant"].get("phone_original") and rec.get("phone"):
+                c["applicant"]["phone_original"] = str(rec["phone"]).strip()   # as the portal writes it
+                changed = True
+            if not c["applicant"].get("email") and rec.get("email"):
+                c["applicant"]["email"] = rec["email"]
+                changed = True
+            filled += changed
+        if filled:
+            _save(calls)
+    if filled:
+        logger.info(f"CRM pull: filled in the CRM id of {filled} job call(s)")
+    return filled
+
+
 async def pull_from_crm() -> dict:
     """Fetch applicants from the CRM API and queue a call for each one not
-    imported before (remembered by applicant + job id, or phone + job
-    title, so a finished call is not queued again on the next pull)."""
+    already on Job Calls (matched by applicant + job id, or phone + job
+    title). Applicants removed from Job Calls are queued again."""
     settings = telephony.load_settings()
     url = (settings.get("crm_api_url") or "").strip()
     if not url:
-        raise ValueError("Set the CRM API URL first (Settings > Calling > Webhooks).")
+        raise ValueError("Set the Fetch API URL first (Settings > Webhooks).")
     headers = {"Accept": "application/json"}
     key = (settings.get("crm_api_key") or "").strip()
     if key:
@@ -280,43 +403,43 @@ async def pull_from_crm() -> dict:
     async with _crm_lock:
         started = _now()
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                r = await client.get(url, headers=headers)
-            if r.status_code >= 400:
-                detail = (r.text or "")[:200]
-                raise ValueError(f"The CRM answered {r.status_code}: {detail}")
-            items = _crm_items(r.json())
-        except httpx.HTTPError as e:
-            raise ValueError(f"Could not reach the CRM at {url}: {e}") from e
-        except json.JSONDecodeError as e:
-            raise ValueError("The CRM did not return JSON.") from e
+            items = await _fetch_pages(url, headers)
+        except ValueError as e:
+            # Kept, so the Webhooks tab shows why the last refresh failed.
+            st = _crm_state()
+            st["last"] = {"at": started, "url": url, "error": str(e)}
+            store.put_doc("crm_import", st)
+            raise
 
-        st = _crm_state()
-        seen = set(st.get("imported", []))
-        records, keys, already = [], [], 0
+        # Skip applicants already on Job Calls (any status, so a finished
+        # call is not queued again). Removed ones are fetched again.
+        cc = settings.get("default_country_code") or ""
+        seen = {_crm_ident(c["applicant"], c["job"], c["applicant"].get("phone", "")) for c in _load()}
+        records, already = [], 0
         for raw in items:
             if not isinstance(raw, dict):
                 continue
             rec = normalize_record(raw)
             if not rec.get("applicant_id") and raw.get("id") not in (None, ""):
                 rec["applicant_id"] = str(raw["id"])
-            ident = (f"{rec.get('applicant_id', '')}|{rec.get('job_id', '')}" if rec.get("applicant_id")
-                     else f"{rec.get('phone', '')}|{(rec.get('job_title') or '').lower()}")
+            ident = _crm_ident(rec, rec, telephony.normalize_phone(rec.get("phone", ""), cc) or rec.get("phone", ""))
             if ident in seen:
                 already += 1
                 continue
+            seen.add(ident)                 # the same applicant twice in one response
             records.append(rec)
-            keys.append(ident)
         result = await add_records(records, source="crm") if records else {"added": 0, "skipped": [], "rejected": [], "ids": []}
-        rejected_rows = {x["row"] for x in result["rejected"]}
-        for i, ident in enumerate(keys, start=1):
-            if i not in rejected_rows:      # rejected ones are retried once the CRM fixes them
-                seen.add(ident)
-        summary = {"at": started, "url": url, "fetched": len(items), "added": result["added"],
-                   "already_imported": already + len(result["skipped"]), "rejected": result["rejected"]}
-        st.update(imported=sorted(seen), last=summary)
+        await _fill_missing_ids(items, cc)
+        called = sum(1 for x in result["skipped"] if x.get("reason") == "already called")
+        summary = {"at": started, "url": url, "fetched": len(items), "added": result["added"], "ids": result.get("ids", []),
+                   "already_imported": already + len(result["skipped"]) - called, "already_called": called,
+                   "rejected": result["rejected"]}
+        st = _crm_state()
+        st.pop("imported", None)            # the old "ever imported" memory is no longer used
+        st["last"] = summary
         store.put_doc("crm_import", st)
-    logger.info(f"CRM pull: {len(items)} fetched, {result['added']} queued, {summary['already_imported']} already imported, "
+    logger.info(f"CRM pull: {len(items)} fetched, {result['added']} queued, {summary['already_imported']} already on Job Calls, "
+                f"{called} already called, "
                 f"{len(result['rejected'])} rejected")
     return summary
 
@@ -347,6 +470,24 @@ async def delete_call(call_id: str) -> bool:
             return False
         _save(kept)
         return True
+
+
+LIVE_STATUSES = ("dialing", "ringing", "in_progress")
+
+
+async def delete_calls(call_ids: list) -> dict:
+    """Remove several applicants / job calls at once. Calls in progress are
+    kept (hang up first)."""
+    wanted = {str(i) for i in call_ids or []}
+    async with _lock:
+        calls = _load()
+        live = [c["id"] for c in calls if c["id"] in wanted and c.get("status") in LIVE_STATUSES]
+        kept = [c for c in calls if c["id"] not in wanted or c["id"] in live]
+        removed = len(calls) - len(kept)
+        if removed:
+            _save(kept)
+    logger.info(f"Outbound: {removed} job call(s) removed, {len(live)} kept (in progress)")
+    return {"removed": removed, "kept_in_progress": len(live)}
 
 
 async def request_dial(call_ids: Optional[list] = None) -> int:
@@ -564,7 +705,7 @@ class CallConversation:
             h = self.profile.get("business_hours")
             return f"Our office hours are {_clean(h)}." if h else None
         if intent == "how_number":
-            return f"Your details are registered with {self.company} as a job applicant, which is why we're calling about this role."
+            return f"Your details are registered with {self.company}, which is why we're calling about this role."
         return None
 
     def reply(self, text: str, interrupted: bool = False) -> tuple:
@@ -598,7 +739,7 @@ class CallConversation:
         if not self.think:
             return None
         j = self.job
-        situation = (f"You are on a phone call with {self.call['applicant'].get('first_name') or 'a job applicant'}, "
+        situation = (f"You are on a phone call with {self.call['applicant'].get('first_name') or 'a contact'}, "
                      f"telling them about a {_clean(j.get('job_title'))} position"
                      + (f" in {_clean(j['location'])}" if j.get("location") else "")
                      + ". Job details: " + "; ".join(f"{k.replace('_', ' ')}: {_clean(v)}" for k, v in j.items() if v) + ".")
@@ -789,6 +930,8 @@ async def dial(call_id: str) -> dict:
         logger.info(f"Outbound call {call_id}: {why}")
         return await update_call(call_id, status="queued", next_attempt_at=until.isoformat(), held_reason=why)
     call_rules.note_call(call["applicant"]["phone"])
+    call_rules.note_contacted(call_rules.contact_keys(call["applicant"], call["job"], call["applicant"]["phone"]),
+                              call["applicant"]["phone"])
     await update_call(call_id, status="dialing", attempts=call["attempts"] + 1, dial_requested=False, error=None,
                       last_attempt_at=_now(), scheduled_callback=False, held_reason=None)
     try:
@@ -830,6 +973,10 @@ async def dialer_loop(stop: asyncio.Event) -> None:
             await dialer_pass()
         except Exception as e:
             logger.error(f"Dialer error: {e}")
+        try:
+            await _maybe_resend_results()
+        except Exception as e:
+            logger.error(f"Result resend error: {e}")
         try:
             await asyncio.wait_for(stop.wait(), timeout=10)
         except asyncio.TimeoutError:
@@ -914,31 +1061,83 @@ def notes_summary(call: dict) -> str:
     return "\n".join(lines)
 
 
-async def send_result(call: dict) -> None:
+async def send_result(call: dict) -> bool:
+    """Send a finished job call's status back to the CRM (Result API).
+    Failures are kept (result_sent False) and retried by the dialer loop."""
     url = (telephony.load_settings().get("result_webhook_url") or "").strip()
     if not url:
-        return
+        return False
+    a, j = call.get("applicant") or {}, call.get("job") or {}
     payload = {
         "event": "call.finished",
         "call_id": call["id"],
-        "applicant_id": call["applicant"].get("applicant_id"),
-        "job_id": call["job"].get("job_id"),
-        "phone": call["applicant"]["phone"],
+        "contact_id": a.get("applicant_id"),
+        "contact_name": " ".join(x for x in (a.get("first_name"), a.get("last_name")) if x),
+        "job_id": j.get("job_id"),
+        "job_title": j.get("job_title") or j.get("title"),
+        # As your portal sent it (07… stays 07…), so it matches the record
+        # instead of reading as a phone change.
+        "phone": a.get("phone_original") or a.get("phone"),
+        "email": a.get("email") or None,
         "status": call["status"],
         "outcome": call.get("outcome"),
-        "attempts": call["attempts"],
+        "attempts": call.get("attempts"),
+        "callback_when": call.get("callback_when"),
         "transcript": call.get("transcript", []),
         "notes": call.get("notes", []),
         "notes_summary": notes_summary(call),
         "finished_at": call.get("ended_at"),
     }
+    if payload["email"]:
+        # The record is found by its id (and email); a phone the portal
+        # stores differently would read as a phone change and be refused.
+        payload.pop("phone")
+    id_field = (telephony.load_settings().get("crm_id_field") or "").strip()
+    if id_field and id_field not in payload:
+        payload = {id_field: payload["contact_id"], **payload}     # what your portal calls the id
+    tries = int(call.get("result_tries") or 0) + 1
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            # Authenticate to the CRM with the same key used to fetch applicants.
-            key = (telephony.load_settings().get("crm_api_key") or "").strip()
+            # The status API's own key, or (when blank) the key used to fetch contacts.
+            st = telephony.load_settings()
+            key = (st.get("crm_result_key") or "").strip() or (st.get("crm_api_key") or "").strip()
             headers = {"Authorization": f"Bearer {key}", "X-API-Key": key} if key else {}
             r = await client.post(url, json=payload, headers=headers)
-        await update_call(call["id"], result_sent=r.status_code < 300)
+        ok = r.status_code < 300
+        error = None if ok else f"The portal answered {r.status_code}: {(r.text or '')[:400]}"
     except Exception as e:
-        logger.warning(f"Could not send call result to CRM: {e}")
-        await update_call(call["id"], result_sent=False)
+        ok, error = False, f"Could not reach {url}: {e}"[:250]
+    if not ok:
+        logger.warning(f"Call result for {call['id'][:8]} not sent (try {tries}): {error}")
+    await update_call(call["id"], result_sent=ok, result_tries=tries, result_error=error,
+                      result_sent_at=_now() if ok else call.get("result_sent_at"))
+    store.put_doc("crm_results", {"last": {"at": _now(), "call_id": call["id"], "ok": ok, "error": error,
+                                           "status": call["status"], "outcome": call.get("outcome"),
+                                           "name": payload["contact_name"] or payload["phone"]}})
+    return ok
+
+
+RESULT_MAX_TRIES = 6
+_last_retry = {"at": 0.0}
+
+
+async def resend_results(force: bool = False) -> dict:
+    """Send again the call statuses the CRM did not accept. Automatic
+    retries stop after RESULT_MAX_TRIES; `force` (the Resend button) tries all."""
+    pending = [c for c in _load() if c.get("result_sent") is False and c.get("status") in _FINAL
+               and (force or int(c.get("result_tries") or 0) < RESULT_MAX_TRIES)]
+    sent = 0
+    for c in pending:
+        if await send_result(c):
+            sent += 1
+    return {"tried": len(pending), "sent": sent, "failed": len(pending) - sent}
+
+
+async def _maybe_resend_results() -> None:
+    """The dialer loop's retry of unsent statuses, every 5 minutes."""
+    import time
+    if time.time() - _last_retry["at"] < 300:
+        return
+    _last_retry["at"] = time.time()
+    if (telephony.load_settings().get("result_webhook_url") or "").strip():
+        await resend_results()

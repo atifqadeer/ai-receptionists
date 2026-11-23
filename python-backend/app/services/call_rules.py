@@ -13,6 +13,9 @@ be called (again). Enforced on every way of placing a call: the auto dialer,
   wrong number   the number goes on the Do Not Call list
   voicemail      try again after `voicemail_retry_minutes`
   daily limit    at most `max_calls_per_day` calls to one number per day
+  called before  a contact (and job) the agent has called is not queued again
+                 when your portal or a CSV sends it again: never, or only after
+                 `recall_after_days` days (kept even if the row is removed)
 
 Calling hours/days, attempts for unanswered calls and the Do Not Call list
 stay where they are (Calling > Outbound Calling, the Do Not Call page) and
@@ -43,6 +46,7 @@ DEFAULTS = {
     "wrong_number_to_dnc": True,
     "voicemail_retry_minutes": 120,
     "max_calls_per_day": 3,
+    "recall_after_days": 0,          # 0 = never call the same contact + job again
 }
 LIMITS = {   # field -> (min, max)
     "hangup_wait_minutes": (0, 1440),
@@ -51,9 +55,10 @@ LIMITS = {   # field -> (min, max)
     "not_interested_days": (0, 365),
     "voicemail_retry_minutes": (5, 10080),
     "max_calls_per_day": (0, 20),
+    "recall_after_days": (0, 365),
 }
 
-_DOC, _HOLDS, _CALLS = "call_rules", "number_holds", "number_calls"
+_DOC, _HOLDS, _CALLS, _CALLED = "call_rules", "number_holds", "number_calls", "contacts_called"
 _lock = threading.Lock()
 
 
@@ -154,6 +159,48 @@ def _calls_today(number: str) -> int:
     today = _now().astimezone(tz).date()
     ts = (store.get_doc(_CALLS) or {}).get("numbers", {}).get(dnc.key(number), [])
     return sum(1 for t in ts if datetime.fromisoformat(t).astimezone(tz).date() == today)
+
+
+# ---- contacts the agent has called (who + which job) ----
+
+def contact_keys(contact: dict, job: dict, phone: str) -> list:
+    """How a contact + job is recognised: by your portal's ids, and by
+    phone + job title (so it matches whether or not the ids came through)."""
+    keys = []
+    if contact.get("applicant_id"):
+        keys.append(f"id:{contact['applicant_id']}|{job.get('job_id', '')}")
+    if phone:
+        keys.append(f"tel:{dnc.key(phone)}|{(job.get('job_title') or '').strip().lower()}")
+    return keys
+
+
+def note_contacted(keys: list, number: str) -> None:
+    """The agent is calling this contact about this job."""
+    if not keys:
+        return
+    with _lock:
+        doc = (store.get_doc(_CALLED) or {}).get("contacts", {})
+        for k in keys:
+            doc[k] = {"at": _now().isoformat(), "number": number}
+        store.put_doc(_CALLED, {"contacts": doc})
+
+
+def called_before(keys: list) -> Optional[str]:
+    """When this contact + job was last called, if that still blocks a new
+    call (recall_after_days; 0 = always blocks)."""
+    doc = (store.get_doc(_CALLED) or {}).get("contacts", {})
+    hits = [doc[k]["at"] for k in keys if k in doc]
+    if not hits:
+        return None
+    last = max(hits)
+    days = get()["recall_after_days"]
+    if days and datetime.fromisoformat(last) < _now() - timedelta(days=days):
+        return None
+    return last
+
+
+def contacted_count() -> int:
+    return len({v["number"] + v["at"][:16] for v in ((store.get_doc(_CALLED) or {}).get("contacts", {})).values()})
 
 
 # ---- the check every call goes through ----
