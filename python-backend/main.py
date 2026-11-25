@@ -17,6 +17,7 @@ from app.core import instance_lock
 from app.core.security import ALLOWED_ORIGINS, LocalOnlyMiddleware
 from app.services.auth import AuthMiddleware
 from app.api.auth_routes import auth_router
+from app.api.backup_routes import backup_router
 from app.api.routes import (
     agent_router,
     calls_router,
@@ -108,6 +109,7 @@ app.add_middleware(WidgetCorsMiddleware)
 
 # Include API routes
 app.include_router(auth_router, prefix="/api/auth", tags=["Login"])
+app.include_router(backup_router, prefix="/api/backup", tags=["Backup"])
 app.include_router(agent_router, prefix="/api/agent", tags=["Agent"])
 app.include_router(calls_router, prefix="/api/calls", tags=["Calls"])
 app.include_router(analytics_report_router, prefix="/api/analytics", tags=["Analytics"])

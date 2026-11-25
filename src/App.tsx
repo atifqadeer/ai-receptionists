@@ -10,7 +10,7 @@ import DncList from './components/DncList';
 import NotInterestedList from './components/NotInterestedList';
 import HungUpList from './components/HungUpList';
 import FollowUpsList from './components/FollowUpsList';
-import { downloadPythonBackend } from './utils/downloadZip';
+import { API_BASE } from './utils/agentApi';
 import { AuthUser, signOut } from './utils/auth';
 
 type Page = 'dashboard' | 'webchat' | 'realcall' | 'jobcalls' | 'followups' | 'dnc' | 'notinterested' | 'hungup' | 'inbound' | 'analytics' | 'settings';
@@ -22,15 +22,29 @@ function App({ user }: { user: AuthUser }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
 
+  // "Download Database": the whole MySQL database as a compressed .sql.gz
+  // file from one consistent snapshot (backend app/services/db_backup.py).
   const handleDownload = async () => {
     setDownloading(true);
     try {
-      await downloadPythonBackend();
+      const res = await fetch(`${API_BASE}/api/backup/database`);
+      if (!res.ok) {
+        const detail = await res.json().then((d) => d?.detail).catch(() => '');
+        throw new Error(detail || `The backend answered ${res.status}`);
+      }
+      const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '')?.[1]
+        || `database-${new Date().toISOString().slice(0, 10)}.sql.gz`;
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
       setDownloadSuccess(true);
       setTimeout(() => setDownloadSuccess(false), 3000);
-    } catch (error) {
-      console.error('Download failed:', error);
-      alert('Download failed. Please try again.');
+    } catch (error: any) {
+      console.error('Database download failed:', error);
+      alert(`The database could not be downloaded: ${error?.message || error}`);
     } finally {
       setDownloading(false);
     }
@@ -107,10 +121,10 @@ function App({ user }: { user: AuthUser }) {
             disabled={downloading}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-gradient-to-r from-violet-600 to-indigo-600 text-white hover:from-violet-700 hover:to-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <i className={`fa-solid ${downloading ? 'fa-spinner fa-spin' : downloadSuccess ? 'fa-check' : 'fa-download'} w-5 text-center`}></i>
+            <i className={`fa-solid ${downloading ? 'fa-spinner fa-spin' : downloadSuccess ? 'fa-check' : 'fa-database'} w-5 text-center`}></i>
             {sidebarOpen && (
               <span>
-                {downloading ? 'Creating ZIP...' : downloadSuccess ? 'Downloaded!' : 'Download Backend'}
+                {downloading ? 'Exporting…' : downloadSuccess ? 'Downloaded!' : 'Download Database'}
               </span>
             )}
           </button>
