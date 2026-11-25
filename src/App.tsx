@@ -7,12 +7,17 @@ import Analytics from './components/Analytics';
 import SettingsHub from './components/SettingsHub';
 import WebsiteChat from './components/WebsiteChat';
 import DncList from './components/DncList';
+import NotInterestedList from './components/NotInterestedList';
+import HungUpList from './components/HungUpList';
+import FollowUpsList from './components/FollowUpsList';
 import { downloadPythonBackend } from './utils/downloadZip';
+import { AuthUser, signOut } from './utils/auth';
 
-type Page = 'dashboard' | 'webchat' | 'realcall' | 'jobcalls' | 'dnc' | 'inbound' | 'analytics' | 'settings';
+type Page = 'dashboard' | 'webchat' | 'realcall' | 'jobcalls' | 'followups' | 'dnc' | 'notinterested' | 'hungup' | 'inbound' | 'analytics' | 'settings';
 
-function App() {
+function App({ user }: { user: AuthUser }) {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
+  const [menuOpen, setMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
@@ -38,7 +43,10 @@ function App() {
     { id: 'realcall', label: 'Make a Call', icon: 'fa-phone-volume' },
     { id: 'inbound', label: 'Inbound Calls', icon: 'fa-headset' },
     { id: 'jobcalls', label: 'Job Calls', icon: 'fa-briefcase' },
+    { id: 'followups', label: 'Follow-ups', icon: 'fa-calendar-check' },
     { id: 'dnc', label: 'Do Not Call', icon: 'fa-ban' },
+    { id: 'notinterested', label: 'Not Interested', icon: 'fa-thumbs-down' },
+    { id: 'hungup', label: 'Hung Up', icon: 'fa-phone-slash' },
     { id: 'settings', label: 'Settings', icon: 'fa-sliders' },
   ];
 
@@ -48,6 +56,9 @@ function App() {
       case 'realcall': return <RealCallSimulator />;
       case 'jobcalls': return <OutboundCalls />;
       case 'dnc': return <DncList />;
+      case 'notinterested': return <NotInterestedList />;
+      case 'hungup': return <HungUpList />;
+      case 'followups': return <FollowUpsList />;
       case 'inbound': return <InboundCalls />;
       case 'webchat': return <WebsiteChat />;
       case 'analytics': return <Analytics />;
@@ -124,6 +135,9 @@ function App() {
               {currentPage === 'realcall' ? 'Make a Voice Call' :
                currentPage === 'jobcalls' ? 'Job Calls' : 
                currentPage === 'dnc' ? 'Do Not Call list' : 
+               currentPage === 'notinterested' ? 'Not interested contacts' : 
+               currentPage === 'hungup' ? 'Hung up calls' :
+               currentPage === 'followups' ? 'Follow-ups' :
                currentPage === 'inbound' ? 'Inbound Calls' : 
                currentPage === 'webchat' ? 'Chat' : 
                currentPage}
@@ -135,6 +149,9 @@ function App() {
               {currentPage === 'inbound' && 'Every call the agent answered on your inbound extension: transcripts, recordings and history'}
               {currentPage === 'jobcalls' && 'The AI agent calls contacts about matching jobs from your CRM or a CSV'}
               {currentPage === 'dnc' && 'People who asked not to be contacted again: the agent never calls these numbers'}
+              {currentPage === 'notinterested' && 'People who turned a role down on a call: held for the Call Rules days, then they may be called about other roles'}
+              {currentPage === 'hungup' && 'Calls where the contact put the phone down before the agent finished'}
+              {currentPage === 'followups' && 'Callback and meeting requests from chat and calls: who asked, when for, and what happens next'}
               {currentPage === 'analytics' && 'View call history and performance metrics'}
               {currentPage === 'settings' && 'Agent, calling, automation and system settings in one place'}
             </p>
@@ -144,8 +161,28 @@ function App() {
               <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
               <span className="text-xs text-emerald-300 font-medium">Agent Online</span>
             </div>
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center">
-              <i className="fa-solid fa-user text-white text-sm"></i>
+            <div className="relative">
+              <button onClick={() => setMenuOpen(!menuOpen)} aria-label="Account" aria-expanded={menuOpen}
+                title={user.email}
+                className="w-9 h-9 rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-sm font-semibold hover:ring-2 hover:ring-violet-400/50">
+                {(user.name || user.email).trim().charAt(0).toUpperCase() || <i className="fa-solid fa-user text-sm"></i>}
+              </button>
+              {menuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)}></div>
+                  <div className="absolute right-0 mt-2 w-60 z-20 rounded-xl border border-gray-700 bg-gray-900 shadow-2xl overflow-hidden">
+                    <div className="px-4 py-3 border-b border-gray-800">
+                      <p className="text-sm font-medium text-white truncate">{user.name || 'Signed in'}</p>
+                      <p className="text-xs text-gray-400 truncate">{user.email}</p>
+                      <span className="inline-block mt-1.5 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300">{user.role}</span>
+                    </div>
+                    <button onClick={signOut}
+                      className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white flex items-center gap-2">
+                      <i className="fa-solid fa-right-from-bracket text-xs"></i>Sign out
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </header>

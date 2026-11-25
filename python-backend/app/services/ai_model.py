@@ -63,6 +63,8 @@ DEFAULTS = {
 _cache: dict = {"at": 0.0, "value": None}
 _lock = threading.Lock()
 _rejected: dict = {}        # (provider, key) -> why: a key the provider refused; not used until changed
+_paused: dict = {}          # (provider, key) -> (until, why): no credit / rate limit; tried again after PAUSE_SECONDS
+PAUSE_SECONDS = 600
 
 
 def _looks_real(key: str) -> bool:
@@ -121,6 +123,12 @@ def available(s: Optional[dict] = None) -> bool:
     return PROVIDERS.get(s["provider"], {}).get("no_key", False) or _looks_real(s.get("api_key", ""))
 
 
+# No credit / quota used up: every request fails (after 1-5 s), so the agent
+# stops asking for a while instead of keeping the caller waiting each turn.
+_CREDIT_ERRORS = ("insufficient_quota", "credit_balance", "no credits", "billing", "exceeded your current quota",
+                  "credit balance is too low", "payment required", "402")
+_RATE_ERRORS = ("429", "rate limit", "rate_limit")
+
 _KEY_ERRORS = ("401", "403", "invalid_api_key", "Incorrect API key", "expired", "model_not_found", "does not exist")
 
 
@@ -138,6 +146,9 @@ def explain(error: Exception, s: Optional[dict] = None) -> str:
         return f"{name} refused the request: this key has no access to model \"{s.get('model')}\" or the account is restricted."
     if "404" in msg or "model_not_found" in msg or "does not exist" in msg:
         return f"The model \"{s.get('model')}\" was not found for this {name} account. Pick another model."
+    if any(x in low for x in _CREDIT_ERRORS):
+        return (f"{name} has no credit left on this account, so the agent can't use the AI model and falls back to "
+                f"its built-in answers. Add credit on {name}'s billing page (it is tried again every 10 minutes).")
     if "429" in msg or "quota" in low or "insufficient" in low:
         return f"{name} refused the request: rate limit, or no credit left on this account."
     if "connection" in low or "connect" in low or "timed out" in low:
@@ -151,6 +162,14 @@ def report_failure(error: Exception) -> None:
     (kept in MySQL, so a restart doesn't retry it); other errors (timeouts,
     outages) only affect that one answer."""
     msg = str(error)
+    low = msg.lower()
+    if any(x in low for x in _CREDIT_ERRORS) or any(x in low for x in _RATE_ERRORS):
+        s = get()
+        credit = any(x in low for x in _CREDIT_ERRORS)
+        seconds = PAUSE_SECONDS if credit else 30
+        _paused[(s["provider"], api_key(s))] = (time.time() + seconds, explain(error, s))
+        logger.warning(f"AI model paused for {seconds}s ({'no credit' if credit else 'rate limited'}): {msg[:160]}")
+        return
     if any(x in msg for x in _KEY_ERRORS):
         s = dict(get(fresh=True))
         reason = explain(error, s)
@@ -165,11 +184,17 @@ def report_failure(error: Exception) -> None:
 
 def rejected_reason(s: Optional[dict] = None) -> str:
     s = s or get()
-    return s.get("rejected") or _rejected.get((s["provider"], api_key(s)), "")
+    k = (s["provider"], api_key(s))
+    paused = _paused.get(k)
+    if paused and paused[0] <= time.time():
+        _paused.pop(k, None)
+        paused = None
+    return s.get("rejected") or _rejected.get(k, "") or (paused[1] if paused else "")
 
 
 def _clear_rejected(s: dict) -> dict:
     _rejected.pop((s["provider"], api_key(s)), None)
+    _paused.pop((s["provider"], api_key(s)), None)
     if s.get("rejected"):
         s = {**s, "rejected": ""}
         store.put_doc("ai_model", s)
@@ -231,6 +256,7 @@ def save(changes: dict) -> dict:
     with _lock:
         _cache.update(at=time.time(), value=s)
     _rejected.clear()
+    _paused.clear()
     return public()
 
 

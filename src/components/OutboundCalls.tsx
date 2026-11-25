@@ -23,6 +23,7 @@ export default function OutboundCalls() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [crm, setCrm] = useState<CrmStatus | null>(null);
   const [pulling, setPulling] = useState(false);
+  const [showSkipped, setShowSkipped] = useState(false);   // who the last refresh did not queue
   const [fresh, setFresh] = useState<Set<string>>(new Set());   // rows the last Refresh data added
   const loadCrm = () => outboundApi.crmStatus().then(setCrm).catch(() => {});
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -220,7 +221,33 @@ export default function OutboundCalls() {
                 <i className="fa-solid fa-circle-check text-emerald-400 mr-1.5"></i>Last refresh {new Date(crm.last.at).toLocaleString()}:{' '}
                 {crm.last.fetched} fetched, {crm.last.added} new, {crm.last.already_imported} already here
                 {crm.last.already_called ? `, ${crm.last.already_called} already called` : ''}
+                {crm.last.rejected?.length ? `, ${crm.last.rejected.length} rejected` : ''}
+                {(crm.last.skipped?.length || crm.last.rejected?.length) ? (
+                  <button onClick={() => setShowSkipped((v) => !v)} className="ml-2 text-violet-300 hover:text-violet-200 underline underline-offset-2">
+                    {showSkipped ? 'Hide' : 'Show who'}
+                  </button>
+                ) : null}
               </span>
+            )}
+            {showSkipped && crm?.last && !crm.last.error && (
+              <ul className="mt-2.5 pt-2.5 border-t border-gray-700/60 space-y-1.5">
+                {[...(crm.last.skipped || []), ...(crm.last.rejected || []).map((x) => ({ ...x, reason: `rejected: ${x.reason}` }))]
+                  .map((s: any, i) => (
+                  <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span className="text-gray-200 font-medium">{s.name || 'No name'}</span>
+                    {s.applicant_id && <span className="text-gray-500">#{s.applicant_id}</span>}
+                    {s.job_title && <span className="text-gray-400">{s.job_title}{s.job_id ? ` (job ${s.job_id})` : ''}</span>}
+                    {s.phone && <span className="text-gray-500">{s.phone}</span>}
+                    <span className={`ml-auto px-2 py-0.5 rounded-full ${s.reason === 'already called' ? 'bg-amber-500/15 text-amber-300'
+                      : s.reason === 'already here' ? 'bg-sky-500/15 text-sky-300' : 'bg-red-500/15 text-red-300'}`}>
+                      {s.reason === 'already called' && s.at ? `called ${new Date(s.at).toLocaleString()}` : s.reason}
+                    </span>
+                  </li>
+                ))}
+                {!crm.last.skipped && (
+                  <li className="text-gray-500">This refresh was before names were saved: press Refresh data to see who.</li>
+                )}
+              </ul>
             )}
           </div>
           <ul className="text-sm text-gray-300 space-y-2.5">

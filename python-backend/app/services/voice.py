@@ -1,9 +1,21 @@
 """
-The agent's live voice and hearing: Deepgram or Cartesia.
+The agent's live voice and hearing: Deepgram, Cartesia or ElevenLabs.
+
+The voice "mode" (Settings > Calling > Call Voice) picks one card:
+- deepgram    everything from Deepgram: on phone calls the Deepgram Voice
+              Agent API hears the caller (Nova-3), thinks (an LLM run by
+              Deepgram) and speaks (Aura-2) over one connection
+              (app/services/deepgram_agent.py); elsewhere Aura-2 / Nova-3
+- cartesia    Cartesia Ink hears, Cartesia Sonic speaks
+- elevenlabs  ElevenLabs Scribe hears, an ElevenLabs voice speaks
+- standard    each part chosen separately (tts_provider, stt_provider)
+In every mode but "deepgram" the agent's answers come from Settings >
+System > AI Model.
 
 Text-to-speech (what the agent says)
 - Deepgram Aura-2   POST /v1/speak, streamed
 - Cartesia Sonic    POST /tts/bytes, streamed
+- ElevenLabs        POST /v1/text-to-speech/{voice}/stream, streamed
 - windows           the old offline Windows voice (sip_dialer.synthesize),
                     also the fallback when the chosen provider fails
 
@@ -11,15 +23,18 @@ Speech-to-text (what the caller says), for the stretch of audio the local
 recogniser (Vosk) marked as the caller's answer
 - Deepgram Nova-3   POST /v1/listen
 - Cartesia Ink      POST /stt
+- ElevenLabs Scribe POST /v1/speech-to-text
 - local             Whisper / Vosk on this PC (sip_dialer), also the fallback
 
 Phone calls get 8 kHz G.711 µ-law straight from the provider (the line
 format, no resampling); the web app gets MP3. Settings, API keys included,
 are the MySQL document "voice"; keys from .env (DEEPGRAM_API_KEY,
-CARTESIA_API_KEY) are used when none is saved.
+CARTESIA_API_KEY, ELEVENLABS_API_KEY) are used when none is saved.
 """
 
 import io
+import math
+import re
 import threading
 import time
 import wave
@@ -34,19 +49,35 @@ from app.core.config import settings as app_settings
 DEEPGRAM_API = "https://api.deepgram.com/v1"
 CARTESIA_API = "https://api.cartesia.ai"
 CARTESIA_VERSION = "2025-04-16"
+ELEVENLABS_API = "https://api.elevenlabs.io/v1"
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 UNSURE = 0.55        # Deepgram transcript confidence below this: ask the caller to repeat
 
-TTS_PROVIDERS = ("deepgram", "cartesia", "windows")
-STT_PROVIDERS = ("deepgram", "cartesia", "local")
+CLOUDS = ("deepgram", "cartesia", "elevenlabs")
+TTS_PROVIDERS = CLOUDS + ("windows",)
+STT_PROVIDERS = CLOUDS + ("local",)
+MODES = ("standard",) + CLOUDS
 
 DEFAULTS = {
+    "mode": "standard",
     "tts_provider": "deepgram",
     "stt_provider": "deepgram",
     "language": "en",
-    "deepgram": {"api_key": "", "tts_voice": "aura-2-thalia-en", "stt_model": "nova-3"},
+    "deepgram": {"api_key": "", "tts_voice": "aura-2-thalia-en", "stt_model": "nova-3",
+                 # the Voice Agent's LLM (mode "deepgram"), run and billed by Deepgram
+                 "agent_llm_provider": "open_ai", "agent_llm_model": "gpt-4o-mini", "agent_temperature": "0.5"},
     "cartesia": {"api_key": "", "tts_model": "sonic-2", "voice_id": "", "voice_name": "",
                  "stt_model": "ink-whisper", "speed": "normal", "voice_gender": ""},
+    "elevenlabs": {"api_key": "", "tts_model": "eleven_flash_v2_5", "voice_id": "", "voice_name": "",
+                   "voice_gender": "", "stt_model": "scribe_v1"},
+}
+
+# LLMs the Deepgram Voice Agent runs for you (no other key needed).
+AGENT_LLMS = {
+    "open_ai": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4.1"],
+    "anthropic": ["claude-3-5-haiku-latest", "claude-sonnet-4-20250514"],
+    "google": ["gemini-2.0-flash", "gemini-2.5-flash"],
+    "groq": ["openai/gpt-oss-20b"],
 }
 
 # Shown when the Deepgram model list can't be fetched. Aura-2 English voices.
@@ -72,6 +103,7 @@ DEEPGRAM_VOICES = [
 
 CARTESIA_TTS_MODELS = ("sonic-2", "sonic-turbo", "sonic-3")
 DEEPGRAM_STT_MODELS = ("nova-3", "nova-2")
+ELEVENLABS_TTS_MODELS = ("eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2")
 
 
 class VoiceError(Exception):
@@ -116,8 +148,10 @@ def api_key(provider: str, s: Optional[dict] = None) -> str:
     s = s or get_settings()
     key = (s.get(provider, {}).get("api_key") or "").strip()
     if not key:
-        key = (app_settings.DEEPGRAM_API_KEY if provider == "deepgram" else
-               getattr(app_settings, "CARTESIA_API_KEY", "")) or ""
+        key = getattr(app_settings, {"deepgram": "DEEPGRAM_API_KEY", "cartesia": "CARTESIA_API_KEY",
+                                     "elevenlabs": "ELEVENLABS_API_KEY"}.get(provider, "-"), "") or ""
+        if "your" in key.lower() or "..." in key:
+            key = ""                    # the placeholder from .env.example
     return key.strip()
 
 
@@ -134,22 +168,28 @@ def _mask(v: str) -> str:
 def public_settings() -> dict:
     s = get_settings(fresh=True)
     out = _merge(s, {})
-    for p in ("deepgram", "cartesia"):
+    for p in CLOUDS:
         out[p] = {**s[p], "api_key": _mask(api_key(p, s)), "key_source": _key_source(p, s),
                   "key_rejected": _auth_failed.get(p) == api_key(p, s) and bool(api_key(p, s))}
+    out["tts_chosen"] = chosen_tts(s)
+    out["stt_chosen"] = chosen_stt(s)
     out["tts_active"] = active_tts(s)
     out["stt_active"] = active_stt(s)
+    out["agent_active"] = agent_active(s)
+    out["agent_llms"] = AGENT_LLMS
     return out
 
 
 def update_settings(changes: dict) -> dict:
     s = get_settings(fresh=True)
     clean: dict = {}
+    if changes.get("mode") in MODES:
+        clean["mode"] = changes["mode"]
     if changes.get("tts_provider") in TTS_PROVIDERS:
         clean["tts_provider"] = changes["tts_provider"]
     if changes.get("stt_provider") in STT_PROVIDERS:
         clean["stt_provider"] = changes["stt_provider"]
-    for p in ("deepgram", "cartesia"):
+    for p in CLOUDS:
         sub = changes.get(p)
         if not isinstance(sub, dict):
             continue
@@ -172,32 +212,64 @@ def _usable(provider: str, s: dict) -> bool:
     return bool(key) and _auth_failed.get(provider) != key
 
 
+def chosen_tts(s: Optional[dict] = None) -> str:
+    """The voice provider picked: the card's own (Deepgram / Cartesia /
+    ElevenLabs), or on the Standard card the one chosen separately."""
+    s = s or get_settings()
+    return s["mode"] if s.get("mode") in CLOUDS else s.get("tts_provider")
+
+
+def chosen_stt(s: Optional[dict] = None) -> str:
+    s = s or get_settings()
+    return s["mode"] if s.get("mode") in CLOUDS else s.get("stt_provider")
+
+
+def elevenlabs_voice(s: dict) -> str:
+    return (s["elevenlabs"].get("voice_id") or getattr(app_settings, "ELEVENLABS_VOICE_ID", "") or "").strip()
+
+
 def active_tts(s: Optional[dict] = None) -> str:
     """The voice calls will actually use: the chosen provider when it has a
     working key, otherwise the Windows voice."""
     s = s or get_settings()
-    p = s.get("tts_provider")
+    p = chosen_tts(s)
     if p == "cartesia" and not (s["cartesia"].get("voice_id")):
         return "windows"
-    return p if p in ("deepgram", "cartesia") and _usable(p, s) else "windows"
+    if p == "elevenlabs" and not elevenlabs_voice(s):
+        return "windows"
+    return p if p in CLOUDS and _usable(p, s) else "windows"
 
 
 def active_stt(s: Optional[dict] = None) -> str:
     s = s or get_settings()
-    p = s.get("stt_provider")
-    return p if p in ("deepgram", "cartesia") and _usable(p, s) else "local"
+    p = chosen_stt(s)
+    return p if p in CLOUDS and _usable(p, s) else "local"
+
+
+def agent_active(s: Optional[dict] = None) -> bool:
+    """Phone calls run on the Deepgram Voice Agent (the Deepgram card, with a working key)."""
+    s = s or get_settings()
+    return s.get("mode") == "deepgram" and _usable("deepgram", s)
+
+
+def mark_rejected(provider: str, key: str) -> None:
+    _auth_failed[provider] = key
 
 
 def _check(r: httpx.Response, provider: str, key: str) -> None:
     if r.status_code in (401, 403):
         _auth_failed[provider] = key
-        raise AuthError(f"{provider.title()} rejected the API key ({r.status_code})")
+        raise AuthError(f"{title(provider)} rejected the API key ({r.status_code})")
     if r.status_code >= 400:
         try:
             detail = r.read().decode(errors="ignore")[:200]
         except Exception:
             detail = ""
-        raise VoiceError(f"{provider.title()} error {r.status_code}: {detail}")
+        raise VoiceError(f"{title(provider)} error {r.status_code}: {detail}")
+
+
+def title(provider: str) -> str:
+    return {"elevenlabs": "ElevenLabs"}.get(provider, provider.title())
 
 
 # ---- text-to-speech ----
@@ -230,23 +302,38 @@ def _cartesia_body(text: str, s: dict, fmt: str, voice_id: str = "", model: str 
     return body
 
 
+def _elevenlabs_request(text: str, s: dict, fmt: str, voice_id: str = "", model: str = "") -> tuple:
+    e = s["elevenlabs"]
+    voice_id = voice_id or elevenlabs_voice(s)
+    params = {"output_format": "ulaw_8000" if fmt == "mulaw" else "mp3_44100_128"}
+    body = {"text": text, "model_id": model or e.get("tts_model") or "eleven_flash_v2_5"}
+    return f"{ELEVENLABS_API}/text-to-speech/{voice_id}/stream", params, body
+
+
 def stream_speech(text: str, fmt: str = "mulaw", provider: str = "", voice: str = "",
                   model: str = "", chunk: int = 800) -> Iterator[bytes]:
     """Audio for `text` as it arrives from the provider: 8 kHz µ-law
     ("mulaw", for phone lines) or MP3 ("mp3", for the web app).
     `voice`/`model` override the saved choice (voice previews)."""
+    from app.services.speakable import for_speech
+    text = for_speech(text)          # "£30k pa" -> "thirty thousand pounds a year"
     s = get_settings()
-    provider = provider or s["tts_provider"]
+    provider = provider or chosen_tts(s)
     key = api_key(provider, s)
-    if provider not in ("deepgram", "cartesia"):
+    if provider not in CLOUDS:
         raise VoiceError("No live voice provider selected")
     if not key:
-        raise VoiceError(f"No {provider.title()} API key: add it in Settings > Agent > Identity & Voice")
+        raise VoiceError(f"No {title(provider)} API key: add it in Settings > Calling > Call Voice")
     with httpx.Client(timeout=TIMEOUT) as client:
         if provider == "deepgram":
             url, params, body = _deepgram_request(text, voice or s["deepgram"]["tts_voice"], fmt)
             req = client.stream("POST", url, params=params, json=body,
                                 headers={"Authorization": f"Token {key}"})
+        elif provider == "elevenlabs":
+            if not (voice or elevenlabs_voice(s)):
+                raise VoiceError("Choose an ElevenLabs voice first")
+            url, params, body = _elevenlabs_request(text, s, fmt, voice, model)
+            req = client.stream("POST", url, params=params, json=body, headers={"xi-api-key": key})
         else:
             if not (voice or s["cartesia"].get("voice_id")):
                 raise VoiceError("Choose a Cartesia voice first")
@@ -275,6 +362,9 @@ def _wav(pcm16_8k: bytes) -> bytes:
     return buf.getvalue()
 
 
+_HINT_SKIP = {"title", "employer", "location", "with", "from", "this", "that", "position", "role"}
+
+
 def transcribe(pcm16_8k: bytes, hint: str = "") -> Optional[dict]:
     """{"text", "confidence", "engine", "seconds"} for 8 kHz 16-bit audio
     from the chosen cloud provider, or None to use the local recogniser
@@ -288,8 +378,13 @@ def transcribe(pcm16_8k: bytes, hint: str = "") -> Optional[dict]:
     try:
         with httpx.Client(timeout=TIMEOUT) as client:
             if provider == "deepgram":
-                params = [("model", s["deepgram"].get("stt_model") or "nova-3"), ("smart_format", "true"),
+                model = s["deepgram"].get("stt_model") or "nova-3"
+                params = [("model", model), ("smart_format", "true"),
                           ("punctuate", "true"), ("language", s.get("language") or "en")]
+                # Words from the job (title, employer, place) the caller is likely to say.
+                terms = list(dict.fromkeys(w for w in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", hint or "")
+                                           if w.lower() not in _HINT_SKIP))[:20]
+                params += [("keyterm" if model.startswith("nova-3") else "keywords", w) for w in terms]
                 r = client.post(f"{DEEPGRAM_API}/listen", params=params, content=_wav(pcm16_8k),
                                 headers={"Authorization": f"Token {key}", "Content-Type": "audio/wav"})
                 _check(r, provider, key)
@@ -297,6 +392,20 @@ def transcribe(pcm16_8k: bytes, hint: str = "") -> Optional[dict]:
                 return {"text": (alt.get("transcript") or "").strip(),
                         "confidence": round(float(alt.get("confidence") or 0.0), 2),
                         "engine": "deepgram", "seconds": round(time.time() - t, 2)}
+            if provider == "elevenlabs":
+                r = client.post(f"{ELEVENLABS_API}/speech-to-text",
+                                data={"model_id": s["elevenlabs"].get("stt_model") or "scribe_v1",
+                                      "language_code": s.get("language") or "en", "tag_audio_events": "false"},
+                                files={"file": ("answer.wav", _wav(pcm16_8k), "audio/wav")},
+                                headers={"xi-api-key": key})
+                _check(r, provider, key)
+                body = r.json()
+                # Scribe gives each word a log-probability; their mean, as 0..1.
+                lp = [float(w["logprob"]) for w in body.get("words") or []
+                      if w.get("type") == "word" and isinstance(w.get("logprob"), (int, float))]
+                conf = round(math.exp(sum(lp) / len(lp)), 2) if lp else 1.0
+                return {"text": (body.get("text") or "").strip(), "confidence": conf,
+                        "engine": "elevenlabs", "seconds": round(time.time() - t, 2)}
             r = client.post(f"{CARTESIA_API}/stt",
                             data={"model": s["cartesia"].get("stt_model") or "ink-whisper",
                                   "language": s.get("language") or "en"},
@@ -384,6 +493,22 @@ def list_voices(provider: str) -> dict:
                     break
                 cursor = items[-1].get("id")
         return {"provider": "cartesia", "voices": voices, "needs_key": False}
+    if provider == "elevenlabs":
+        if not key:
+            return {"provider": "elevenlabs", "voices": [], "needs_key": True}
+        with httpx.Client(timeout=TIMEOUT) as client:
+            r = client.get(f"{ELEVENLABS_API}/voices", headers={"xi-api-key": key})
+            _check(r, "elevenlabs", key)
+        voices = []
+        for v in r.json().get("voices", []):
+            labels = v.get("labels") or {}
+            voices.append({"id": v.get("voice_id"), "name": v.get("name") or v.get("voice_id"),
+                           "gender": (labels.get("gender") or "").lower(),
+                           "accent": (labels.get("accent") or "").title(),
+                           "description": (labels.get("description") or labels.get("descriptive")
+                                           or labels.get("use_case") or v.get("description") or "")[:120]})
+        voices.sort(key=lambda v: (v["gender"], v["name"]))
+        return {"provider": "elevenlabs", "voices": voices, "needs_key": False}
     raise VoiceError("Unknown provider")
 
 
@@ -392,7 +517,7 @@ def test_provider(provider: str) -> dict:
     t = time.time()
     try:
         audio = b"".join(stream_speech("Hello, this is a test.", "mulaw", provider=provider))
-        return {"ok": True, "message": f"{provider.title()} is working ({len(audio) / 8000:.1f}s of audio in "
+        return {"ok": True, "message": f"{title(provider)} is working ({len(audio) / 8000:.1f}s of audio in "
                                        f"{time.time() - t:.1f}s)."}
     except Exception as e:
         return {"ok": False, "message": str(e)}

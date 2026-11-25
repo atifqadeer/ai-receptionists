@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from loguru import logger
 
 from app.services import call_rules
-from app.services import dnc, inbound, outbound, telephony
+from app.services import dnc, inbound, not_interested, outbound, telephony
 from app.services.knowledge import KnowledgeBase
 
 telephony_router = APIRouter()
@@ -182,6 +182,51 @@ async def dnc_add(data: dict):
 async def dnc_remove(number: str):
     if not await asyncio.to_thread(dnc.remove, number):
         raise HTTPException(status_code=404, detail="That number is not on the Do Not Call list")
+    return {"ok": True}
+
+
+# ---- Hung up: calls where the other person put the phone down ----
+
+@outbound_router.get("/hung-up")
+async def hung_up_list():
+    from app.services import hung_up
+    return {"calls": await asyncio.to_thread(hung_up.entries)}
+
+
+@outbound_router.post("/hung-up/{number}/release")
+async def hung_up_release(number: str):
+    """Lift the Call Rules wait after a hang-up, so the number can be called now."""
+    if not await asyncio.to_thread(call_rules.release, number):
+        raise HTTPException(status_code=404, detail="That number is not waiting after a hang-up")
+    return {"ok": True}
+
+
+# ---- Not interested: contacts who turned a role down on a call ----
+
+@outbound_router.get("/not-interested")
+async def not_interested_list():
+    return {"numbers": await asyncio.to_thread(not_interested.entries)}
+
+
+@outbound_router.delete("/not-interested/{number}")
+async def not_interested_remove(number: str):
+    """Take a contact off the list and release the Call Rules hold, so they can be called again."""
+    if not await asyncio.to_thread(not_interested.remove, number):
+        raise HTTPException(status_code=404, detail="That number is not on the Not interested list")
+    await asyncio.to_thread(call_rules.release, number)
+    return {"ok": True}
+
+
+@outbound_router.post("/not-interested/{number}/dnc")
+async def not_interested_to_dnc(number: str):
+    """Move a contact to the Do Not Call list."""
+    entry = next((e for e in await asyncio.to_thread(not_interested.entries)
+                  if dnc.key(e["number"]) == dnc.key(number)), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="That number is not on the Not interested list")
+    await asyncio.to_thread(dnc.add, entry["number"], "not interested", entry.get("said", ""),
+                            entry.get("call_id", ""), entry.get("name", ""))
+    await asyncio.to_thread(not_interested.remove, number)
     return {"ok": True}
 
 
@@ -388,4 +433,37 @@ async def voice_status(request: Request, cid: str):
             # back to dialling or ringing.
             if call and not (call["status"] == "in_progress" and status in ("dialing", "ringing")):
                 await outbound.update_call(cid, status=status)
+    return {"ok": True}
+
+
+# ---- Follow-ups: callback and meeting requests (app/services/follow_ups.py) ----
+
+@outbound_router.get("/follow-ups")
+async def follow_ups_list():
+    from app.services import follow_ups
+    return {"items": await asyncio.to_thread(follow_ups.entries)}
+
+
+@outbound_router.patch("/follow-ups/{item_id}")
+async def follow_ups_update(item_id: str, data: dict):
+    """Mark done / cancel / reopen, or stop the automatic re-dial."""
+    from app.services import follow_ups
+    changes = {}
+    if data.get("status") in ("open", "scheduled", "done", "cancelled"):
+        changes["status"] = data["status"]
+    if "auto_dial" in data:
+        changes["auto_dial"] = bool(data["auto_dial"])
+    if "note" in data:
+        changes["note"] = str(data["note"] or "")[:300]
+    item = await asyncio.to_thread(follow_ups.update, item_id, **changes)
+    if not item:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    return item
+
+
+@outbound_router.delete("/follow-ups/{item_id}")
+async def follow_ups_delete(item_id: str):
+    from app.services import follow_ups
+    if not await asyncio.to_thread(follow_ups.remove, item_id):
+        raise HTTPException(status_code=404, detail="Follow-up not found")
     return {"ok": True}

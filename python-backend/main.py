@@ -15,6 +15,8 @@ from app.core.config import settings
 from app.core.database import init_db
 from app.core import instance_lock
 from app.core.security import ALLOWED_ORIGINS, LocalOnlyMiddleware
+from app.services.auth import AuthMiddleware
+from app.api.auth_routes import auth_router
 from app.api.routes import (
     agent_router,
     calls_router,
@@ -87,6 +89,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Login: every /api/ request needs a signed-in user (app/services/auth.py).
+# Added first, so it runs inside CORS (a 401 still carries CORS headers).
+app.add_middleware(AuthMiddleware)
 # CORS: only the local dashboard (see app/core/security.py; add more
 # dashboard URLs with APP_ALLOWED_ORIGINS)
 app.add_middleware(
@@ -102,6 +107,7 @@ app.add_middleware(LocalOnlyMiddleware)
 app.add_middleware(WidgetCorsMiddleware)
 
 # Include API routes
+app.include_router(auth_router, prefix="/api/auth", tags=["Login"])
 app.include_router(agent_router, prefix="/api/agent", tags=["Agent"])
 app.include_router(calls_router, prefix="/api/calls", tags=["Calls"])
 app.include_router(analytics_report_router, prefix="/api/analytics", tags=["Analytics"])

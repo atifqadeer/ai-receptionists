@@ -38,6 +38,7 @@ from typing import Callable, Optional
 from loguru import logger
 
 from app.services import voice as voice_engine
+from app.services.speakable import for_speech
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 # Speech models, best first: the first one found in models/ is used. The
@@ -70,7 +71,8 @@ CLOUD_STT_MAX = 4.0        # ...when there is no local Whisper to fall back on
 CLOUD_STT_SLOW = 2         # slow cloud answers in one call before it switches to local for good
 LISTEN_START_TIMEOUT = 8   # seconds of silence before "didn't catch that"
 LISTEN_MAX = 20            # longest single answer, seconds
-END_OF_SPEECH = 1.0        # silence that ends an answer, seconds
+END_OF_SPEECH = 0.8        # silence that ends an answer, seconds
+END_AFTER_FINAL = 0.6      # ...once the recogniser has already closed the sentence
 FRAME = 160                # 20 ms of 8 kHz audio
 TTS_RATE = 0               # Windows voice speed, -10..10 (0 = the voice's natural pace)
 
@@ -84,6 +86,38 @@ BARGE_IN_LOUD = 0.25       # seconds of talking before the agent stops
 _FILLER = {"the", "a", "an", "uh", "um", "huh", "oh", "ah", "er", "hmm", "mm", "and", "i", "it", "is"}
 # One of these alone is enough to stop the agent.
 _STOP_WORDS = {"wait", "sorry", "hello", "stop", "excuse", "pardon", "hold", "what", "hang", "question"}
+
+
+# Line noise: on some lines (mobile, a noisy room) the background is 200-700
+# RMS, above BARGE_IN_RMS, so every frame looked like speech and an answer
+# only ended at LISTEN_MAX (20 s). The gate learns the line's own noise and
+# counts as voice only what is clearly above it.
+NOISE_FACTOR = 2.5         # voice is this many times the line's noise floor...
+VOICE_RMS_MAX = 1100       # ...but never needs to be louder than this (speech is 1000-10000)
+VOICED_FRAMES = 3          # frames in a row above the threshold that count as voice (a click is one or two)
+
+
+class NoiseGate:
+    """Is a 20 ms frame of the caller's line voice, or the line's own noise?"""
+
+    def __init__(self):
+        self.levels: deque = deque(maxlen=250)   # the last 5 s
+        self.floor = 0
+        self.run = 0
+
+    def threshold(self) -> float:
+        return min(VOICE_RMS_MAX, max(BARGE_IN_RMS, self.floor * NOISE_FACTOR))
+
+    def learn(self, rms: int) -> None:
+        self.levels.append(rms)
+        if len(self.levels) >= 25 and len(self.levels) % 5 == 0:
+            ordered = sorted(self.levels)
+            self.floor = ordered[len(ordered) // 5]   # the quiet fifth: gaps between words, or silence
+
+    def voice(self, rms: int) -> bool:
+        self.learn(rms)
+        self.run = self.run + 1 if rms > self.threshold() else 0
+        return self.run >= VOICED_FRAMES
 
 
 def barge_in_words(heard: str, agent_text: str) -> list:
@@ -141,8 +175,9 @@ def agent_voice_gender() -> str:
     gender = ""
     try:
         s = voice_engine.get_settings()
-        if s["tts_provider"] == "cartesia":
-            name = (s["cartesia"].get("voice_gender") or "").lower()
+        chosen = voice_engine.chosen_tts(s)
+        if chosen in ("cartesia", "elevenlabs"):
+            name = (s[chosen].get("voice_gender") or "").lower()
         else:
             vid = s["deepgram"].get("tts_voice")
             name = next((g for i, _, g, _, _ in voice_engine.DEEPGRAM_VOICES if i == vid), "")
@@ -162,7 +197,7 @@ def synthesize(text: str, language: str = "en-GB", voice: str = "") -> bytes:
             return _tts_cache[key]
     with tempfile.TemporaryDirectory() as tmp:
         txt, wav = os.path.join(tmp, "say.txt"), os.path.join(tmp, "say.wav")
-        Path(txt).write_text(text, encoding="utf-8")
+        Path(txt).write_text(for_speech(text), encoding="utf-8")
         env = {**os.environ, "TTS_IN": txt, "TTS_OUT": wav, "TTS_LANG": language or "en-GB",
                "TTS_RATE": str(TTS_RATE), "TTS_GENDER": gender,
                "TTS_VOICE": "" if (voice or "").lower().startswith("polly.") else (voice or "")}
@@ -200,9 +235,13 @@ class Speech:
         self.started = time.time()
         self.first_seconds: Optional[float] = None
         s = voice_engine.get_settings()
-        self.key = (self.engine, s["deepgram"].get("tts_voice") if self.engine == "deepgram" else
-                    (s["cartesia"].get("voice_id"), s["cartesia"].get("tts_model"), s["cartesia"].get("speed")),
-                    text)
+        if self.engine == "deepgram":
+            which = s["deepgram"].get("tts_voice")
+        elif self.engine == "elevenlabs":
+            which = (voice_engine.elevenlabs_voice(s), s["elevenlabs"].get("tts_model"))
+        else:
+            which = (s["cartesia"].get("voice_id"), s["cartesia"].get("tts_model"), s["cartesia"].get("speed"))
+        self.key = (self.engine, which, text)
         with _tts_lock:
             cached = _tts_cache.get(self.key) if self.engine != "windows" else None
         if cached is not None:
@@ -1039,7 +1078,8 @@ class SipCallSession(threading.Thread):
             rms = audioop.rms(pcm16, 2)
             peak = max(peak, rms)
             if interruptible:
-                loud = loud + 1 if rms > BARGE_IN_RMS else max(0, loud - 1)
+                self._gate().learn(rms)     # the line's noise, learned while the agent talks too
+                loud = loud + 1 if rms > self._gate().threshold() else max(0, loud - 1)
                 model_audio, resample = to_model_rate(pcm16, resample)
                 if rec.AcceptWaveform(model_audio):
                     heard = (heard + " " + take_result(rec.Result(), confs)).strip()
@@ -1062,6 +1102,13 @@ class SipCallSession(threading.Thread):
                     heard, confs = "", []  # noise or echo: forget it
         speech.cancel()
         return None
+
+    def _gate(self) -> NoiseGate:
+        """The call's noise gate: it keeps what it learned about the line between answers."""
+        gate = getattr(self, "noise_gate", None)
+        if gate is None:
+            gate = self.noise_gate = NoiseGate()
+        return gate
 
     def _transcribe(self, clip: bytes) -> tuple:
         """(cloud result, Whisper result) for the caller's answer; one of
@@ -1126,21 +1173,29 @@ class SipCallSession(threading.Thread):
         heard = bool(barge)
         voice_from = 0 if barge else None   # where speech starts in `audio`
         voice_to = len(audio)                # where it last had voice
-        partial = ""
-        self.audit.event("listening", after_barge_in=bool(barge))
+        partial, partial_words, closed = "", 0, False
+        gate = self._gate()
+        self.audit.event("listening", after_barge_in=bool(barge), noise_floor=gate.floor,
+                         voice_threshold=round(gate.threshold()))
         while self._answered():
             pcm16 = self._frame_in()
             audio += pcm16
-            loud = audioop.rms(pcm16, 2) > BARGE_IN_RMS
+            loud = gate.voice(audioop.rms(pcm16, 2))
             model_audio, resample = to_model_rate(pcm16, resample)
             if rec.AcceptWaveform(model_audio):
+                before = said
                 said = (said + " " + take_result(rec.Result(), confs)).strip()
-                partial = ""
+                partial, partial_words = "", 0
+                closed = said != before          # the recogniser ended a sentence here
             else:
                 now_partial = json.loads(rec.PartialResult()).get("partial", "")
                 if now_partial != partial:
                     partial = now_partial
-                    loud = loud or bool(now_partial)
+                    # New real words (not noise fillers) mean they are still talking.
+                    words = len(barge_in_words(now_partial, ""))
+                    if words > partial_words:
+                        loud, closed = True, False
+                    partial_words = words
             if loud:
                 if voice_from is None:
                     voice_from = max(0, len(audio) - 2 * 8000)  # from 1 s before the voice
@@ -1148,7 +1203,8 @@ class SipCallSession(threading.Thread):
                 voice_to = len(audio)
             now = self.clock
             if (not heard and now - start > LISTEN_START_TIMEOUT) or now - start > LISTEN_MAX \
-                    or (heard and now - last_voice > END_OF_SPEECH):
+                    or (heard and now - last_voice > END_OF_SPEECH) \
+                    or (heard and closed and said and now - last_voice > END_AFTER_FINAL):
                 break
         vosk_text = (said + " " + take_result(rec.FinalResult(), confs)).strip()
         result, self.unclear, whisper, cloud = vosk_text, bool(vosk_text) and is_unclear(confs), None, None
@@ -1170,15 +1226,58 @@ class SipCallSession(threading.Thread):
             else:
                 result, self.unclear = text, whisper["logprob"] < WHISPER_UNSURE
         self.audit.event("heard", text=result, vosk=vosk_text, whisper=whisper, cloud=cloud,
+                         noise_floor=gate.floor, voice_threshold=round(gate.threshold()),
                          seconds=round(self.clock - start, 1), confidence=[round(c, 2) for c in confs],
                          unclear=self.unclear, listen_lag=round(time.time() - self.clock, 2))
         return result
 
+    def _voice_agent(self, conv, record: dict, transcript: list, save: Callable[[], None], link=None) -> str:
+        """A job call held by the Deepgram Voice Agent (the Deepgram card):
+        "done", "dropped" or "unavailable" (see deepgram_agent.converse)."""
+        from app.services import call_intents, deepgram_agent
+        from app.services.outbound import _now
+        turns = {"n": 0}
+
+        def decide(text: str):
+            turns["n"] += 1
+            d = call_intents.detect(text, allow_voicemail=turns["n"] <= 2)
+            if d is None and turns["n"] == 1 and call_intents.is_bare_no(text):
+                d = "not_interested"        # "no" to "would you be interested in this position?"
+            return (d, "") if d in call_intents.ENDING else None
+
+        def on_outcome(outcome: str, heard: str, details: dict) -> None:
+            if outcome == "completed":
+                record["outcome"] = record.get("outcome") or "undecided"
+                return
+            record["outcome"] = outcome
+            record["outcome_said"] = heard
+            if outcome == "callback":
+                record["callback_when"] = call_intents.callback_when(details.get("callback_when") or heard)
+            record.setdefault("notes", []).append({"at": _now(), "kind": "decision", "applicant": heard,
+                                                   "agent": "", "interrupted": False,
+                                                   "by": details.get("by") or "voice agent"})
+            self.audit.event("decision", outcome=outcome, heard=heard, by=details.get("by") or "voice agent")
+
+        return deepgram_agent.converse(
+            self, prompt=conv.voice_agent_prompt(), greeting=conv.opening(), transcript=transcript, save=save,
+            user_role="applicant", decide=decide, on_outcome=on_outcome, lookup=conv.voice_agent_lookup,
+            link=link, on_meeting=conv._record_meeting)
+
     def run(self) -> None:
-        from app.services import outbound
+        from app.services import deepgram_agent, outbound
         from pyVoIP.VoIP import CallState
         final = "failed"
+        link = None
         try:
+            # The Deepgram card: connect while the phone rings, so the
+            # opening plays the moment the applicant answers.
+            if deepgram_agent.enabled():
+                try:
+                    pre = self.make_conversation(outbound.get_call(self.call_id))
+                    if hasattr(pre, "voice_agent_prompt"):
+                        link = deepgram_agent.open_link(self, pre.voice_agent_prompt(), pre.opening())
+                except Exception as e:
+                    logger.warning(f"SIP call {self.call_id}: Voice Agent not prepared ({e})")
             whisper_model()   # loaded before dialling, not during the first answer
             phone = sip_phone.ensure(self.settings["credentials"]["sip"])
             self.call = phone.call(self.dial)
@@ -1219,9 +1318,18 @@ class SipCallSession(threading.Thread):
                     transcript[-1]["interrupted"] = True
                 return barge
 
-            barge = turn(conv.opening(), False)
+            # The Deepgram card: Deepgram hears, thinks and speaks; the
+            # rule-based conversation below only runs when it can't be reached.
+            how = "unavailable"
+            if (link is not None or deepgram_agent.enabled()) and hasattr(conv, "voice_agent_prompt"):
+                how = self._voice_agent(conv, record, transcript, save, link)
+            agent_done = how == "done"
+            if how == "dropped" and self._answered():
+                barge = turn("Sorry, the line dropped for a moment. Could you say that again?", False)
+            else:
+                barge = None if agent_done else turn(conv.opening(), False)
             unclear_streak = 0
-            while self._answered():
+            while not agent_done and self._answered():
                 interrupted = barge is not None
                 heard = self.listen(barge)
                 if not self._answered():
@@ -1261,6 +1369,8 @@ class SipCallSession(threading.Thread):
                 pass
             final = "failed"
         finally:
+            if link is not None:
+                link.close()           # not answered, or the call is over
             if self._answered():
                 try:
                     time.sleep(0.5)

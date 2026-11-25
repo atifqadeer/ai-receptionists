@@ -41,6 +41,11 @@ class AIAgent:
         # Text chats (the test chat in the dashboard) started with
         # channel "chat"; website chats have ids starting "widget-".
         self.chat_sessions: set = set()
+        # Chat callback / meeting requests: the visitor's contact details
+        # (the website chat knows their email and name) and a request still
+        # waiting for a phone number or a time.
+        self.chat_contacts: dict[str, dict] = {}
+        self.chat_requests: dict[str, dict] = {}
 
     def _load_config(self) -> AgentConfig:
         """Load the persisted config if present, else the defaults."""
@@ -206,6 +211,25 @@ AVAILABLE INTENTS:
             "content": user_message
         })
 
+        # "Who are you?", "how are you?", "can I talk to a human?"
+        own = self._self_turn(call_id, user_message)
+        if own:
+            text, intent, action = own
+            self.conversation_history[call_id].append({"role": "assistant", "content": text})
+            return AgentResponse(message=text, intent=intent, confidence=1.0, call_id=call_id,
+                                 timestamp=datetime.utcnow().isoformat(),
+                                 requires_action=action.get("action") != "none", action_data=action)
+
+        # Chat: "call me back tomorrow", "can I book a meeting with the recruiter?"
+        if self.is_chat(call_id):
+            follow = self._chat_follow_up(call_id, user_message)
+            if follow:
+                self.conversation_history[call_id].append({"role": "assistant", "content": follow})
+                return AgentResponse(message=follow, intent="appointment_booking", confidence=1.0, call_id=call_id,
+                                     timestamp=datetime.utcnow().isoformat(), requires_action=False,
+                                     action_data={"action": "follow_up_recorded"
+                                                  if call_id not in self.chat_requests else "collecting_details"})
+
         # Knowledge base first. With a working AI model only a matching
         # FAQ is answered verbatim; every other question goes to the
         # model, which has the whole knowledge base in its prompt and
@@ -214,12 +238,23 @@ AVAILABLE INTENTS:
         llm_ready = self._llm_available()
         # Company name, address, contact details, hours, roles: straight
         # from Agent Setup, before any search or AI model.
-        kb_hit = None if llm_ready else self._conversation(call_id).guard(user_message)
+        # The language guardrail (Settings > Agent > Languages) applies with or
+        # without the AI model: the model sometimes replied in a language
+        # that isn't switched on.
+        kb_hit = self._conversation(call_id).guard(user_message)
         if kb_hit is None:
             kb_hit = self._company_fact(call_id, user_message)
         if kb_hit is None:
             if llm_ready:
                 kb_hit = self._faq_lookup(self._significant_words(user_message))
+                if kb_hit is None:
+                    # An FAQ in the knowledge documents asking this very
+                    # question is answered as written (the model sometimes
+                    # answered "how can I apply" with just the role list).
+                    sources = self._knowledge_sources()
+                    doc_faq = KnowledgeBase(sources, self.config.company_name).faq_answer(user_message) if sources else None
+                    if doc_faq:
+                        kb_hit = (doc_faq, "general_inquiry")
             else:
                 kb_hit = self._converse(call_id, user_message)
         if kb_hit is not None:
@@ -326,8 +361,8 @@ AVAILABLE INTENTS:
             messages.append(turn)
         messages.append({"role": "user", "content": question})
         try:
-            response = ai_model.client(sync=True, timeout=8.0).chat.completions.create(
-                model=ai_model.get()["model"], messages=messages, temperature=0.4, max_tokens=120)
+            response = ai_model.client(sync=True, timeout=5.0).chat.completions.create(
+                model=ai_model.get()["model"], messages=messages, temperature=0.4, max_tokens=90)
             answer = re.sub(r"\s+", " ", (response.choices[0].message.content or "")).strip()
             return answer or None
         except Exception as e:
@@ -335,16 +370,198 @@ AVAILABLE INTENTS:
             ai_model.report_failure(e)
             return None
 
+    # Questions about the agent itself, and asking for a person: answered
+    # before any knowledge search ("what is your name?" used to find the
+    # screening checklist "The candidate provides: full name, ...").
+    _HUMAN = re.compile(
+        r"\b((live|real|human)( chat)? (agent|person|operator|support|team member)|"
+        r"(talk|speak|chat) (to|with) (a |an |the |your |some )?(human|person|real person|live agent|agent|operator|"
+        r"someone|somebody|team|staff|representative|advisor|adviser|recruiter|consultant|member of (your|the) team)|"
+        r"transfer (me|the chat|this chat|chat|my chat)|customer (service|support)|connect me (to|with)|"
+        r"(get|want|need) (a |an )?(human|real person|live agent|person))\b", re.I)
+    _IDENTITY = re.compile(
+        r"\b(who (are|r) (you|u)|what('?s| is) (your|ur) name|(tell me )?your name\b|"
+        r"who am i (talking|speaking|chatting) (to|with)|"
+        r"are (you|u) (a |an )?(robot|bot|real|human|person|machine|computer|ai|chatbot|chat bot)|"
+        r"is this (a |an )?(bot|robot|real person|human|ai|chatbot))", re.I)
+    _HOW_ARE_YOU = re.compile(r"\b(how are (you|u)|how r u|how('?s| is) it going|how (have|'?ve) you been|"
+                              r"what about you|and you\s*\??$|how('?s| is) your day)", re.I)
+
+    def _self_turn(self, call_id: str, message: str) -> Optional[tuple]:
+        """(reply, intent, action) for "who are you?", "are you a bot?", "how
+        are you?" and, in a chat, "can I talk to a human?"; else None."""
+        cfg = self.config
+        agent, company = cfg.agent_name or "the assistant", cfg.company_name or "our company"
+        chat = self.is_chat(call_id)
+        if chat and self._HUMAN.search(message):
+            email = (self.chat_contacts.get(call_id) or {}).get("email")
+            return (("Of course. I'm passing this chat to a member of our team now; they'll reply right here as "
+                     "soon as they can." + (f" If they're away, they'll get back to you at {email}." if email else "")),
+                    "transfer_request", {"action": "transfer_to_human"})
+        if self._IDENTITY.search(message):
+            roles = KnowledgeBase(self._knowledge_sources(), company).roles()
+            offer = (f"I can tell you about our {company_facts._join(roles)} roles, how to apply"
+                     + (", or pass you to a member of our team" if chat else "") + ". ") if roles else ""
+            if re.search(r"\b(robot|bot|real|human|person|machine|computer|ai|chatbot)\b", message, re.I):
+                return (f"I'm {agent}, an AI assistant for {company}. {offer}How can I help you?").replace("  ", " "), \
+                    "general_inquiry", {"action": "none"}
+            return (f"I'm {agent}, the AI assistant for {company}. {offer}What would you like to know?"), \
+                "general_inquiry", {"action": "none"}
+        if self._HOW_ARE_YOU.search(message) and len(message.split()) <= 12:
+            return "I'm doing well, thank you for asking! How can I help you today?", "other", {"action": "none"}
+        # "Do you have nurse jobs in London?": where the vacancies are (the
+        # role description used to come back instead).
+        place = self._JOBS_IN.search(message)
+        if place and (place.group(1)[0].isupper() or place.group(1).lower() in self._UK_PLACES):
+            kb = KnowledgeBase(self._knowledge_sources(), company)
+            where = kb.faq_answer("Do you have vacancies throughout the UK?", 0.5) or ""
+            role = kb.find_role(message)
+            if where:
+                return (f"{where} Our recruitment team can tell you about current "
+                        f"{role + ' ' if role else ''}vacancies in {place.group(1).title()}"
+                        f"{' and take your details' if role else ''}. "
+                        + ("Would you like the requirements for the role, or shall I take a few details?" if role
+                           else "Which role are you interested in?")), "general_inquiry", {"action": "none"}
+        # "Are there jobs in healthcare?": the roles in that sector (a role
+        # document's "Category: Healthcare." line used to come back).
+        sector = self._SECTOR.search(message) or self._SECTOR_BEFORE.search(message)
+        if sector:
+            from app.services import role_categories
+            cat = role_categories.category(sector.group(1) or "")
+            kb = KnowledgeBase(self._knowledge_sources(), company)
+            roles = kb.roles()
+            low = message.lower()
+            named = any(re.search(rf"\b{re.escape(r.lower())}s?\b", low) for r in roles)
+            if cat and not named:
+                same = [r for r in roles if role_categories.category(r) == cat]
+                if same:
+                    return (f"Yes! In {cat}, we recruit for {company_facts._join(same)} positions. "
+                            "Which one would you like to know more about?"), "general_inquiry", {"action": "none"}
+                if roles:
+                    return (f"We don't currently recruit in {cat}, I'm afraid. We recruit for "
+                            f"{company_facts._join(roles)} positions. Would any of those interest you?"), \
+                        "general_inquiry", {"action": "none"}
+        return None
+
+    _SECTOR = re.compile(r"\b(?:jobs?|roles?|vacanc\w+|positions?|work|opportunit\w+|openings?)\b[^?.!]*?"
+                         r"\b(?:in|for|within)\s+(?:the\s+)?([a-z]+(?:\s[a-z]+)?)", re.I)
+    _SECTOR_BEFORE = re.compile(r"\b([a-z]+)\s+(?:jobs|roles|vacancies|positions)\b", re.I)
+
+    _JOBS_IN = re.compile(r"\b(?:jobs?|vacanc\w+|roles?|positions?|work|openings?|opportunit\w+)\b[^?.!]*?"
+                          r"\b(?:in|near|around|based in)\s+([A-Za-z][a-z]+)")
+    _UK_PLACES = {"london", "manchester", "birmingham", "leeds", "liverpool", "glasgow", "edinburgh", "bristol",
+                  "cardiff", "sheffield", "newcastle", "nottingham", "leicester", "coventry", "belfast", "bradford",
+                  "southampton", "brighton", "oxford", "cambridge", "reading", "york", "uk", "england", "scotland",
+                  "wales"}
+
+    _PHONE = re.compile(r"(?<![\w@])\+?\d[\d\s().-]{6,}\d(?![\w@])")
+    _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+    _NAME = re.compile(r"\b(?:my name is|my name's|i am|i'm|im|this is|name:)\s+([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+)?)",
+                       re.I)
+    _NOT_NAMES = {"busy", "driving", "interested", "looking", "free", "available", "here", "not", "at", "in", "on",
+                  "a", "an", "the", "working", "out", "fine", "good", "ok", "okay", "sorry", "calling", "trying"}
+
+    def _chat_follow_up(self, conv_id: str, text: str) -> Optional[str]:
+        """A callback or meeting request in a text chat: collect what the
+        team needs (a phone number for a callback; a time and a way to reach
+        them for a meeting), then put it on the Follow-ups page. Returns the
+        reply, or None when this message isn't part of one."""
+        from app.services import call_intents, follow_ups
+        contact = self.chat_contacts.setdefault(conv_id, {})
+        phone = self._PHONE.search(text)
+        email = self._EMAIL.search(text)
+        name = self._NAME.search(text)
+        if phone and len(re.sub(r"\D", "", phone.group(0))) >= 7:
+            contact["phone"] = phone.group(0).strip()
+        if email:
+            contact["email"] = email.group(0)
+        if name and name.group(1).split()[0].lower() not in self._NOT_NAMES:
+            contact["name"] = name.group(1).title()
+
+        low = text.lower()
+        req = self.chat_requests.get(conv_id)
+        if req is None:
+            if call_intents.is_meeting_request(text):
+                kind = "meeting"
+            elif call_intents.detect(text, allow_voicemail=False) == "callback" or \
+                    re.search(r"\b(call|ring|phone) me\b|\b(a |request a )?call ?back\b", low):
+                kind = "callback"
+            else:
+                return None
+            req = self.chat_requests[conv_id] = {"kind": kind, "when": call_intents.callback_when(text),
+                                                 "said": text[:300], "asked": 0}
+        else:
+            when = call_intents.callback_when(text)
+            req["when"] = req["when"] or when
+            req["said"] = (req["said"] + " / " + text)[:400]
+            gave_details = bool(phone or email or name or when)
+            if not gave_details and (low.rstrip().endswith("?") or req["asked"] >= 2):
+                # They moved on: keep what we have if it's enough, else let it go.
+                self.chat_requests.pop(conv_id, None)
+                if req["kind"] == "meeting" and (contact.get("email") or contact.get("phone")):
+                    self._save_chat_follow_up(conv_id, req, contact)
+                return None
+            if not gave_details and req["asked"] >= 1 and not req["when"]:
+                req["when"] = text.strip().rstrip(".")[:80]       # "any time", "the 3rd": as they said it
+
+        needs_phone = req["kind"] == "callback" and not contact.get("phone")
+        needs_contact = req["kind"] == "meeting" and not (contact.get("phone") or contact.get("email"))
+        needs_time = not req["when"] and req["asked"] == 0
+        if (needs_phone or needs_contact or needs_time) and req["asked"] < 2:
+            req["asked"] += 1
+            ask = []
+            if needs_phone:
+                ask.append("the best phone number to call you on")
+            elif needs_contact:
+                ask.append("a phone number or email address we can reach you on")
+            if needs_time:
+                ask.append("what day and time suits you" if req["kind"] == "meeting" else "when suits you best")
+            lead = ("Of course! I'll ask our recruitment team to arrange a meeting with you."
+                    if req["kind"] == "meeting" else "Of course! I'll ask our recruitment team to call you back.")
+            if req["asked"] > 1:
+                lead = "Sorry, I didn't quite get that."
+            return f"{lead} Could you tell me {' and '.join(ask)}?"
+        if needs_phone or needs_contact:
+            self.chat_requests.pop(conv_id, None)
+            kb = self.config.knowledge_base or {}
+            reach = " or ".join(v for v in (kb.get("phone"), kb.get("email")) if v)
+            return ("No problem. " + (f"You can reach our recruitment team on {reach} whenever suits you. " if reach else "")
+                    + "Is there anything else I can help you with?")
+        self.chat_requests.pop(conv_id, None)
+        self._save_chat_follow_up(conv_id, req, contact)
+        who = f", {contact['name'].split()[0]}" if contact.get("name") else ""
+        when = req["when"]
+        if req["kind"] == "callback":
+            return (f"Thanks{who}! I've asked our recruitment team to call you on {contact['phone']}"
+                    f"{' ' + when if when else ' as soon as they can'}. Is there anything else I can help you with?")
+        how = contact.get("phone") or contact.get("email")
+        return (f"Thanks{who}! I've passed your request for a meeting {follow_ups._for(when) if when else ''} to our "
+                f"recruitment team. They'll contact you on {how} to confirm it. Is there anything else I can help you with?"
+                ).replace("meeting  to", "meeting to")
+
+    def _save_chat_follow_up(self, conv_id: str, req: dict, contact: dict) -> None:
+        from app.services import follow_ups
+        try:
+            follow_ups.add(req["kind"], "chat", phone=contact.get("phone", ""), name=contact.get("name", ""),
+                           email=contact.get("email", ""), when=req.get("when", ""), said=req.get("said", ""),
+                           ref=conv_id)
+        except Exception as e:
+            logger.warning(f"Chat {conv_id}: follow-up not recorded: {e}")
+
     def _company_fact(self, call_id: str, message: str) -> Optional[tuple]:
         """(answer, intent) for a question about the company itself, else
         None. Calls the agent places itself (dial pad) have call ids that
         start with "dialed-": there the agent is the one calling."""
-        intent = company_facts.detect(message)
+        intent = company_facts.detect(message, self.config.company_name)
         if not intent:
             return None
-        roles = KnowledgeBase(self._knowledge_sources(), self.config.company_name).roles() if intent == "roles" else None
+        roles, overview = None, ""
+        if intent in ("roles", "company_services"):
+            kb = KnowledgeBase(self._knowledge_sources(), self.config.company_name)
+            roles = kb.roles()
+            overview = (kb.overview() or "") if intent == "company_services" else ""
         text = company_facts.answer(intent, self.config.company_name, self.config.knowledge_base or {}, roles,
-                                    calling=call_id.startswith("dialed-"))
+                                    calling=call_id.startswith("dialed-"), overview=overview)
         if not text:
             return None
         state = self.call_state.get(call_id)

@@ -32,8 +32,8 @@ async def save_voice_settings(data: dict):
 
 @voice_engine_router.get("/voices")
 async def list_voices(provider: str):
-    if provider not in ("deepgram", "cartesia"):
-        raise HTTPException(status_code=400, detail="provider must be deepgram or cartesia")
+    if provider not in voice.CLOUDS:
+        raise HTTPException(status_code=400, detail="provider must be deepgram, cartesia or elevenlabs")
     try:
         return await asyncio.to_thread(voice.list_voices, provider)
     except voice.VoiceError as e:
@@ -43,9 +43,16 @@ async def list_voices(provider: str):
 @voice_engine_router.post("/test")
 async def test_voice(data: dict):
     provider = data.get("provider")
-    if provider not in ("deepgram", "cartesia"):
-        raise HTTPException(status_code=400, detail="provider must be deepgram or cartesia")
+    if provider not in voice.CLOUDS:
+        raise HTTPException(status_code=400, detail="provider must be deepgram, cartesia or elevenlabs")
     return await asyncio.to_thread(voice.test_provider, provider)
+
+
+@voice_engine_router.post("/agent-test")
+async def test_voice_agent():
+    """The Deepgram card: connect to the Deepgram Voice Agent and have it accept the settings."""
+    from app.services import deepgram_agent
+    return await asyncio.to_thread(deepgram_agent.test)
 
 
 @voice_engine_router.post("/speak")
@@ -70,7 +77,7 @@ async def _speak(text: str, provider: str, voice_id: str, model: str):
         raise HTTPException(status_code=400, detail="Nothing to say")
     s = voice.get_settings()
     provider = provider or voice.active_tts(s)
-    if provider not in ("deepgram", "cartesia"):
+    if provider not in voice.CLOUDS:
         raise HTTPException(status_code=409, detail="No live voice provider is active")
     gen = voice.stream_speech(text, "mp3", provider=provider, voice=voice_id, model=model, chunk=4096)
     # Fetch the first chunk here, so a bad key or voice is an HTTP error

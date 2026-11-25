@@ -156,6 +156,10 @@ def is_gibberish(text: str) -> bool:
         return True
     if re.fullmatch(r"(asdf\w*|qwer\w*|zxcv\w*|hjkl\w*|jkl\w*)", t.lower()):
         return True
+    # One made-up "word" typed on the keyboard: "asfdsdf", "dfgdfg", "sdfsdf".
+    if len(w) == 1 and len(w[0]) >= 6 and re.fullmatch(r"[a-z]+", w[0]):
+        if re.search(r"(sdf|dfg|fgh|ghj|hjk|jkl|qwe|xcv|zxc|asd|fds|gfd|lkj)", w[0]):
+            return True
     return False
 
 
@@ -206,10 +210,11 @@ PHRASES = {
                       "Good question, but it's not something I can help with on this chat. {pitch}"],
         "gibberish": ["Sorry, I didn't quite get that. Could you type it again? {pitch}",
                       "Hmm, that came through a bit jumbled. What would you like to know? {pitch}"],
-        "fallback": ["I don't have the details on that, but our team can help{contact}. {pitch}",
-                     "That's one for our recruitment team{contact}. Meanwhile, {pitch_lc}",
-                     "I'm not able to answer that one myself. {pitch}",
-                     "Let me point you in the right direction: {pitch_lc}"],
+        "fallback": ["I'm sorry, I don't have that information, and I'd rather not guess. Our recruitment team can "
+                     "help{contact}. {pitch}",
+                     "I'm not sure about that one, I'm afraid. Our recruitment team can help{contact}. {pitch}",
+                     "That's not something I have details on. You're welcome to contact our recruitment team{contact}. "
+                     "{pitch}"],
         "pitch": ["We're currently hiring for {roles} roles. Which one interests you?",
                   "Right now {company} is recruiting {roles}. Would you like the requirements for one of them?",
                   "I can tell you about our {roles} vacancies, what they pay, the requirements and how to apply. Which role should we start with?"],

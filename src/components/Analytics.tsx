@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { API_BASE } from '../utils/agentApi';
+import { withToken } from '../utils/auth';
 import { STATUS_STYLE, statusLabel, outcomeLabel } from '../utils/callStatus';
 
 // Analytics: real numbers from the backend (MySQL calls and chat tables),
@@ -153,7 +154,7 @@ export default function Analytics() {
             <i className={`fa-solid fa-rotate ${loading ? 'fa-spin' : ''}`}></i>
           </button>
         </div>
-        <a href={`${API_BASE}/api/analytics/calls.csv?period=${period}`} download
+        <a href={withToken(`${API_BASE}/api/analytics/calls.csv?period=${period}`)} download
           className="px-4 py-2 rounded-lg border border-gray-700 text-sm text-gray-300 hover:bg-gray-800 transition-all flex items-center gap-2">
           <i className="fa-solid fa-download"></i>Export calls (CSV)
         </a>

@@ -31,8 +31,9 @@ from app.services import call_rules
 from app.services import telephony
 from app.services.knowledge import KnowledgeBase
 from app.services import company_facts
-from app.services import call_intents, dnc, language_settings
+from app.services import call_intents, dnc, follow_ups, language_settings
 from app.services import chat_language
+from app.services import role_categories
 
 _lock = asyncio.Lock()
 
@@ -181,6 +182,12 @@ async def update_call(call_id: str, **changes) -> Optional[dict]:
     return None
 
 
+def _who(rec: dict) -> dict:
+    """What identifies a contact in a refresh summary."""
+    return {"applicant_id": rec.get("applicant_id") or None, "job_id": rec.get("job_id") or None,
+            "job_title": rec.get("job_title") or None, "phone": str(rec.get("phone") or "").strip() or None}
+
+
 async def add_records(records: list, source: str) -> dict:
     """Queue a call per record. Records without a valid phone number or a
     job title are rejected; a record already queued (same applicant and
@@ -203,14 +210,20 @@ async def add_records(records: list, source: str) -> dict:
             called = call_rules.called_before(call_rules.contact_keys(rec, rec, phone))
             if called:
                 skipped.append({"row": i, "reason": "already called", "at": called,
-                                "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip()})
+                                "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip(),
+                                **_who(rec)})
                 continue
-            dup = next((c for c in calls if c["status"] not in _FINAL and (
-                (rec.get("applicant_id") and rec.get("job_id") and c["applicant"].get("applicant_id") == rec.get("applicant_id")
-                 and c["job"].get("job_id") == rec.get("job_id"))
-                or (c["applicant"]["phone"] == phone and c["job"].get("job_title", "").lower() == rec["job_title"].lower()))), None)
+            def same(c: dict) -> bool:
+                # Both with your portal's ids: compare those only, so two
+                # applicants sharing a phone are not taken for one.
+                if rec.get("applicant_id") and c["applicant"].get("applicant_id"):
+                    return (str(c["applicant"]["applicant_id"]) == str(rec["applicant_id"])
+                            and str(c["job"].get("job_id") or "") == str(rec.get("job_id") or ""))
+                return c["applicant"]["phone"] == phone and c["job"].get("job_title", "").lower() == rec["job_title"].lower()
+            dup = next((c for c in calls if c["status"] not in _FINAL and same(c)), None)
             if dup:
-                skipped.append({"row": i, "id": dup["id"], "reason": "already queued"})
+                skipped.append({"row": i, "id": dup["id"], "reason": "already queued",
+                                "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip(), **_who(rec)})
                 continue
             call = {
                 "id": uuid.uuid4().hex,
@@ -415,7 +428,7 @@ async def pull_from_crm() -> dict:
         # call is not queued again). Removed ones are fetched again.
         cc = settings.get("default_country_code") or ""
         seen = {_crm_ident(c["applicant"], c["job"], c["applicant"].get("phone", "")) for c in _load()}
-        records, already = [], 0
+        records, already, here = [], 0, []
         for raw in items:
             if not isinstance(raw, dict):
                 continue
@@ -425,6 +438,8 @@ async def pull_from_crm() -> dict:
             ident = _crm_ident(rec, rec, telephony.normalize_phone(rec.get("phone", ""), cc) or rec.get("phone", ""))
             if ident in seen:
                 already += 1
+                here.append({"reason": "already here", **_who(rec),
+                             "name": f"{rec.get('first_name', '')} {rec.get('last_name', '')}".strip()})
                 continue
             seen.add(ident)                 # the same applicant twice in one response
             records.append(rec)
@@ -433,7 +448,10 @@ async def pull_from_crm() -> dict:
         called = sum(1 for x in result["skipped"] if x.get("reason") == "already called")
         summary = {"at": started, "url": url, "fetched": len(items), "added": result["added"], "ids": result.get("ids", []),
                    "already_imported": already + len(result["skipped"]) - called, "already_called": called,
-                   "rejected": result["rejected"]}
+                   "rejected": result["rejected"],
+                   # Who was not queued, so the page can list them.
+                   "skipped": here + [{**x, "reason": "already here" if x["reason"] == "already queued" else x["reason"]}
+                                      for x in result["skipped"]]}
         st = _crm_state()
         st.pop("imported", None)            # the old "ever imported" memory is no longer used
         st["last"] = summary
@@ -473,6 +491,58 @@ async def delete_call(call_id: str) -> bool:
 
 
 LIVE_STATUSES = ("dialing", "ringing", "in_progress")
+STALE_AFTER = 30           # seconds a SIP call may be "live" without its call thread (it is starting)
+
+
+def _sip_thread_alive(call_id: str) -> bool:
+    import threading
+    name = f"sip-call-{call_id[:8]}"
+    return any(t.name == name and t.is_alive() for t in threading.enumerate())
+
+
+def _orphaned(c: dict, now: datetime) -> bool:
+    """A SIP job call marked live whose call no longer exists in this
+    backend: it was cut off by a restart (the backend reloads when its
+    code changes) or the call thread crashed. Left as is, it counts as a
+    call in progress forever and the dialer places no more calls."""
+    if c.get("status") not in LIVE_STATUSES or not str(c.get("provider_call_id") or "sip-").startswith("sip-"):
+        return False
+    try:
+        changed = datetime.fromisoformat(c.get("updated_at") or c.get("last_attempt_at") or "")
+    except ValueError:
+        changed = now - timedelta(seconds=STALE_AFTER + 1)
+    return (now - changed).total_seconds() > STALE_AFTER and not _sip_thread_alive(c["id"])
+
+
+async def recover_orphaned_calls() -> int:
+    """Close job calls left "in progress" with no call behind them. A call
+    that never got answered goes back in the queue; one that was answered
+    ends as dropped (it is reported to the CRM like any other call)."""
+    now = datetime.now(timezone.utc)
+    fixed = []
+    async with _lock:
+        calls = _load()
+        for c in calls:
+            if not _orphaned(c, now):
+                continue
+            if c["status"] == "in_progress" or c.get("answered_at"):
+                c.update(status="dropped", ended_at=c.get("ended_at") or _now(), updated_at=_now(),
+                         error="The call was cut off: the backend restarted (or the call stopped) mid-call.")
+                fixed.append((c["id"], True))
+            else:
+                c.update(status="queued", updated_at=_now(), next_attempt_at=None,
+                         error="The backend restarted while dialling; the call will be placed again.")
+                fixed.append((c["id"], False))
+        if fixed:
+            _save(calls)
+    for call_id, ended in fixed:
+        logger.warning(f"Outbound call {call_id}: no live call behind it; "
+                       + ("marked as dropped" if ended else "put back in the queue"))
+        if ended:
+            call = get_call(call_id)
+            if call:
+                await send_result(call, "dropped")
+    return len(fixed)
 
 
 async def delete_calls(call_ids: list) -> dict:
@@ -507,6 +577,12 @@ async def request_dial(call_ids: Optional[list] = None) -> int:
 
 
 # ---- what the agent says ----
+
+def _join(items: list) -> str:
+    """"Nurse", "Care Assistant" -> "Nurse and Care Assistant"."""
+    items = [_clean(x) for x in items if x]
+    return ", ".join(items[:-1]) + " and " + items[-1] if len(items) > 1 else (items[0] if items else "")
+
 
 def _clean(v: str) -> str:
     return re.sub(r"\s+", " ", (v or "").strip()).rstrip(".")
@@ -565,6 +641,10 @@ _PATTERNS = [
     ("employer", r"\b(employer|which company|who is the (client|employer)|who would i (be )?work(ing)? for)\b"),
     ("interested", r"\b(yes|yeah|yep|sure|interested|sounds (good|great)|i'?d (like|love)|go ahead|apply|definitely|absolutely|of course|okay|ok)\b"),
     ("goodbye", r"\b(bye|goodbye|that'?s all|nothing else|no more questions|no that'?s it)\b"),
+    # "No, everything is clear" / "no I'm good" after "anything else you'd like to know?"
+    ("all_clear", r"\b(everything('?s| is)? (clear|fine|good|ok(ay)?)|all (clear|good|fine)|that'?s (clear|fine|everything)|"
+                  r"(no|not any|don'?t have any) (other |more |further )?questions?|nothing (else|more)( for now)?|"
+                  r"i'?m (good|fine|ok(ay)?|all good)|no,? (it'?s|that'?s) (fine|ok(ay)?|alright|good)|got it)\b"),
     ("thanks", r"\b(thank you|thanks|cheers)\b"),
 ]
 
@@ -645,6 +725,11 @@ class CallConversation:
         self.think = think
         self.call = call
         self.job = call["job"]
+        # The job's category, the company's other roles in it, and the roles
+        # outside it (never offered or described on this call).
+        all_roles = (knowledge.roles() if knowledge else []) + role_categories.split_roles(self.profile.get("services") or "")
+        self.category, self.related_roles, self.other_roles = role_categories.same_category(self.job, all_roles)
+        self.category = self.category or "this field"
         self.state = call.setdefault("state", {})
         self.agent_name = agent_name
         self.company = company
@@ -653,6 +738,80 @@ class CallConversation:
 
     def opening(self) -> str:
         return opening_pitch(self.call, self.agent_name, self.company)
+
+    # ---- the Deepgram card: the same call, held by the Deepgram Voice Agent's LLM ----
+
+    _JOB_FIELDS = (("job_title", "Job title"), ("employer", "Employer"), ("location", "Location"),
+                   ("salary", "Salary"), ("benefits", "Benefits"), ("working_hours", "Working hours"),
+                   ("job_type", "Job type"), ("start_date", "Start date"), ("qualifications", "Qualifications"),
+                   ("experience", "Experience"), ("job_description", "Duties"))
+
+    def voice_agent_prompt(self) -> str:
+        """The instructions for the LLM when Deepgram holds the whole call
+        (deepgram_agent): the job, the company and the same limits as the
+        rule-based conversation (only this job's field, facts only from here)."""
+        name = (self.call.get("applicant") or {}).get("first_name") or "the applicant"
+        title = _clean(self.job.get("job_title") or "")
+        job = "\n".join(f"- {label}: {_clean(str(self.job[k]))}" for k, label in self._JOB_FIELDS if self.job.get(k))
+        about = self._role_safe(self.knowledge.overview() if self.knowledge else None) or ""
+        p = self.profile
+        company = "\n".join(f"- {label}: {_clean(str(p[k]))}" for k, label in
+                            (("address", "Office address"), ("phone", "Phone"), ("email", "Email"),
+                             ("business_hours", "Office hours")) if p.get(k))
+        related = (f"Other roles {self.company} recruits for in {self.category}: {_join(self.related_roles)}. "
+                   "Mention them only if asked; a recruiter gives the details.") if self.related_roles else ""
+        return f"""You are {self.agent_name}, an AI recruitment assistant calling from {self.company}.
+You are phoning {name} about a {title} position. You have already opened the call with:
+"{self.opening()}"
+Listen to their answer and carry on from there.
+
+THE JOB:
+{job}
+
+THE COMPANY:
+{about or f"{self.company} is a recruitment agency."}
+{company}
+{related}
+
+YOUR GOAL: find out whether {name} is interested in this {title} position and answer their questions about it.
+- Interested: say a recruiter will be in touch with the next steps, ask if they have any other questions,
+  then end the call with outcome interested.
+- Not interested, already has a job, or a plain no: thank them politely and end the call (not_interested).
+- Busy or asks to be called later: ask when suits them, then end the call (callback, with when).
+- Asks not to be called again: apologise, confirm, end the call (do_not_call).
+- Wrong person or never applied: apologise, end the call (wrong_number).
+- An answering machine or voicemail greeting: say who you are and that you'll try again later, then end (voicemail).
+
+RULES:
+- Job facts come ONLY from THE JOB above. Anything not listed: say the recruiter will confirm it.
+- Talk only about this job{" and the roles in " + self.category if self.related_roles else ""}; never offer other kinds of work.
+- If asked, say honestly that you are an AI assistant. Their details are registered with {self.company}.
+- This is a short call: keep every answer to one or two sentences.
+"""
+
+    def _record_meeting(self, when: str, said: str) -> None:
+        """A meeting request on a job call: on the Follow-ups page for the team."""
+        a = self.call.get("applicant") or {}
+        follow_ups.add("meeting", "job call", phone=a.get("phone", ""), email=a.get("email", "") or "",
+                       name=" ".join(x for x in (a.get("first_name"), a.get("last_name")) if x),
+                       when=when, said=said, ref=self.call.get("id", ""),
+                       job=_clean(self.job.get("job_title") or ""))
+        self.call["meeting_requested"] = when or "no time given"
+
+    def voice_agent_lookup(self, question: str) -> str:
+        """The knowledge base search for the Voice Agent's lookup_company_info."""
+        intent = company_facts.detect(question, self.company)
+        if intent:
+            fact = self._job_answer("company_about" if intent == "company_services" else intent)
+            if fact:
+                return fact
+        if not self.knowledge:
+            return ""
+        faq = self.knowledge.faq_answer(question)
+        if faq:
+            return faq
+        answer, _ = self.knowledge.search_detail(question, self.job.get("job_title"))
+        return self._role_safe(answer) or ""
 
     def _field(self, key: str, sentence: str) -> Optional[str]:
         v = self.job.get(key)
@@ -684,15 +843,23 @@ class CallConversation:
             return f"This is {self.agent_name}, an AI assistant calling from {self.company} about a {_clean(j['job_title'])} position."
         if intent == "company_name":
             return f"I'm calling from {self.company}."
+        if intent == "company_about":
+            # The company introduction, unless it lists roles outside this job's field.
+            about = self._role_safe(self.knowledge.overview() if self.knowledge else None)
+            title = _clean(j["job_title"])
+            return about or (f"{self.company} is a recruitment agency that places candidates with employers"
+                             + (f" in {self.category}" if self.related_roles or self.category != "this field" else "")
+                             + f". Today I'm calling about the {title} position.")
         if intent == "roles":
-            roles = self.knowledge.roles() if self.knowledge else []
-            listed = self.profile.get("services") or ""
-            if roles:
-                listed = ", ".join(roles[:-1]) + " and " + roles[-1] if len(roles) > 1 else roles[0]
-            if listed:
-                return (f"{self.company} recruits for {_clean(listed)}. Right now I'm calling about the "
-                        f"{_clean(j['job_title'])} position.")
-            return f"Today I'm calling about the {_clean(j['job_title'])} position; our recruiter can tell you about our other roles."
+            # Only roles in this job's own category ("care and health" for a
+            # Registered Manager call): the call never moves to other kinds of work.
+            title = _clean(j["job_title"])
+            if self.related_roles:
+                listed = _join(self.related_roles)
+                return (f"In {self.category}, besides this {title} position, we also recruit for {listed}. "
+                        f"Our recruiter can tell you more about those; today I'm calling about the {title} role.")
+            return (f"Today I'm calling about the {title} position, and that's the role I can tell you about. "
+                    f"Our recruiter can let you know about any other suitable vacancies.")
         if intent == "company_address":
             a = self.profile.get("address")
             return f"Our office address is {_clean(a)}." if a else "Our recruiter will send you our office address."
@@ -714,7 +881,16 @@ class CallConversation:
         of every applicant response (question, answer, decision) in
         call["notes"]. `interrupted`: the applicant spoke over the agent."""
         text = (text or "").strip()
-        said, end, kind = self._reply(text)
+        meet = follow_ups.meeting_reply(self.state, text, self._record_meeting) if text else None
+        if meet:
+            # Asking for a meeting about the job means they're interested.
+            if not self.call.get("outcome"):
+                self.call["outcome"] = "interested"
+            if not meet.endswith("?"):
+                meet += " Is there anything else you'd like to know about the role?"
+            said, end, kind = meet, False, "meeting"
+        else:
+            said, end, kind = self._reply(text)
         if text:
             self.call.setdefault("notes", []).append({
                 "at": _now(), "kind": kind, "applicant": text, "agent": said, "interrupted": bool(interrupted)})
@@ -743,10 +919,23 @@ class CallConversation:
                      f"telling them about a {_clean(j.get('job_title'))} position"
                      + (f" in {_clean(j['location'])}" if j.get("location") else "")
                      + ". Job details: " + "; ".join(f"{k.replace('_', ' ')}: {_clean(v)}" for k, v in j.items() if v) + ".")
+        title = _clean(j.get("job_title")) or "this"
+        situation += (f" STAY ON THIS ROLE: talk only about the {title} position"
+                      + (f" and, if asked, other {self.category} roles ({_join(self.related_roles)})" if self.related_roles else "")
+                      + ". Never describe, suggest or offer roles outside this field"
+                      + (f" (such as {_join(self.other_roles[:4])})" if self.other_roles else "")
+                      + "; if the person asks about them, say the recruiter can discuss other kinds of roles separately.")
         history = []
         for n in (self.call.get("notes") or [])[-3:]:
             history += [{"role": "user", "content": n.get("applicant", "")}, {"role": "assistant", "content": n.get("agent", "")}]
-        return self.think(text, situation, history)
+        return self._role_safe(self.think(text, situation, history))
+
+    def _role_safe(self, answer: Optional[str]) -> Optional[str]:
+        """`answer`, unless it talks about roles outside this job's category
+        (a knowledge passage from the Chef document on a nurse call)."""
+        if answer and role_categories.mentions(answer, self.other_roles):
+            return None
+        return answer
 
     def _refuse(self, follow: str) -> str:
         self.state["off_topic"] = self.state.get("off_topic", 0) + 1
@@ -769,7 +958,16 @@ class CallConversation:
             return "Sorry, I didn't catch that. " + follow, False, "silence"
         st["silence"] = 0
         intents = _classify(text)
-        question = is_question(text)
+        if re.search(r"\babout (your|the|this) (company|agency|business|firm|organi[sz]ation)\b|\bwhat (does|do) "
+                     r"(your|the) (company|agency) do\b", text, re.I) or "company_services" in intents:
+            intents = ["company_about"]
+        # "Where is Kingsbury Personnel?": the office, not the job's location.
+        elif company_facts.detect(text, self.company) == "company_address":
+            intents = ["company_address"]
+        # "No, everything is clear. Hello?": a "hello?" / "are you there?" at the
+        # end checks the line is still open; it doesn't make the rest a question.
+        core = re.sub(r"[\s,.]*\b(hello|hi|are you (still )?there|you there)\W*$", "", text, flags=re.I).strip()
+        question = is_question(core or text)
         # "Where are you calling from" / "where did you get my number" are
         # about the call, not the job's location.
         for only in ("how_number", "company_address", "company_contact", "office_hours", "roles", "company_name", "identity"):
@@ -805,14 +1003,23 @@ class CallConversation:
                     "shortly to arrange the next steps. Is there anything you'd like to know about the role?")
             return self._finish(said, follow, "decision")
         decided = self.call.get("outcome") == "interested"
-        if not question and ("goodbye" in intents or (decided and "thanks" in intents) or
+        if not question and ("goodbye" in intents or (decided and ("thanks" in intents or "all_clear" in intents)) or
                              (decided and re.fullmatch(r"\W*(no|nope|nah|no thanks?)\W*", text.lower()))):
             name = self.call["applicant"].get("first_name") or ""
             return f"Thank you for your time, {name}. Goodbye.".replace(" .", "."), True, "response"
         if "thanks" in intents and not question:
             return self._finish("You're welcome. " + follow, follow, "response")
 
-        kb_answer = self.knowledge.search(text) if self.knowledge else None
+        # Asked about a different kind of role (a chef job on a nurse call):
+        # don't switch roles; the recruiter handles that.
+        other = role_categories.mentions(text, self.other_roles)
+        if other and not role_categories.mentions(text, self.related_roles + [self.job.get("job_title") or ""]):
+            title = _clean(self.job.get("job_title")) or "this"
+            return self._finish(f"On this call I can only help with the {title} position and other {self.category} "
+                                f"roles. Our recruiter can talk to you about {other[0]} roles separately. " + follow,
+                                follow, "off_topic")
+
+        kb_answer = self._role_safe(self.knowledge.search(text, self.job.get("job_title")) if self.knowledge else None)
         if kb_answer:
             return self._finish(kb_answer + " " + follow, follow, "question")
         on_topic = bool(_words(text) & on_topic_words(self.job, self.company))
@@ -923,7 +1130,9 @@ async def dial(call_id: str) -> dict:
         raise telephony.TelephonyError("Call not found")
     if dnc.contains(call["applicant"]["phone"]):
         logger.info(f"Outbound call {call_id}: {call['applicant']['phone']} is on the Do Not Call list, not dialled")
-        return await update_call(call_id, status="dnc", outcome="do_not_call", dial_requested=False)
+        # Not a call: nothing to report (the CRM already blocks do_not_call numbers).
+        return await update_call(call_id, status="dnc", outcome="do_not_call", dial_requested=False,
+                                 result_sent=None)
     blocked = call_rules.check(call["applicant"]["phone"])
     if blocked:                 # Call Rules: wait (hang-up, not interested, daily limit)
         until, why = blocked
@@ -939,7 +1148,9 @@ async def dial(call_id: str) -> dict:
         return await update_call(call_id, provider_call_id=provider_id)
     except Exception as e:
         logger.warning(f"Outbound call {call_id} failed to start: {e}")
-        return await update_call(call_id, status="failed", error=str(e))
+        call = await update_call(call_id, status="failed", error=str(e), ended_at=_now())
+        await send_result(call, "failed")
+        return get_call(call_id)
 
 
 async def dialer_pass() -> None:
@@ -948,6 +1159,7 @@ async def dialer_pass() -> None:
     settings = telephony.load_settings()
     if not telephony.is_configured(settings):
         return
+    await recover_orphaned_calls()      # a call cut off by a restart must not block the queue
     calls = _load()
     active = sum(1 for c in calls if c["status"] in ("dialing", "ringing", "in_progress"))
     room = max(0, int(settings.get("max_concurrent_calls") or 1) - active)
@@ -973,6 +1185,11 @@ async def dialer_loop(stop: asyncio.Event) -> None:
             await dialer_pass()
         except Exception as e:
             logger.error(f"Dialer error: {e}")
+        try:
+            from app.services import follow_ups
+            await follow_ups.dial_due()       # dial-pad callbacks and voicemails, dialled again
+        except Exception as e:
+            logger.error(f"Follow-up dialer error: {e}")
         try:
             await _maybe_resend_results()
         except Exception as e:
@@ -1002,7 +1219,11 @@ async def finish_call(call_id: str, status: str) -> None:
     rules = call_rules.get()
     phone = call["applicant"]["phone"]
     name = " ".join(x for x in (call["applicant"].get("first_name"), call["applicant"].get("last_name")) if x)
-    call_rules.after_call(phone, changes["status"], call_id, name, call.get("outcome_said") or "")
+    said = call.get("outcome_said") or next((n.get("applicant", "") for n in reversed(call.get("notes") or [])
+                                             if n.get("kind") == "decision"), "")
+    call_rules.after_call(phone, changes["status"], call_id, name, said, "job call",
+                          _clean(call.get("job", {}).get("job_title") or ""))
+    attempt_status = changes["status"]      # what happened on this call, before any re-queue
     if status in ("no_answer", "busy") and call["attempts"] < int(settings.get("max_attempts") or 1):
         voicemail = changes.get("last_result") == "voicemail"
         wait = rules["voicemail_retry_minutes"] if voicemail else int(settings.get("retry_minutes") or 60)
@@ -1017,11 +1238,30 @@ async def finish_call(call_id: str, status: str) -> None:
                        callbacks=int(call.get("callbacks") or 0) + 1, last_result="callback")
         logger.info(f"Outbound call {call_id}: calling back at {at.isoformat()} "
                     f"(they said {call.get('callback_when') or 'nothing specific'})")
+    if changes["status"] in ("callback", "queued") and (changes.get("last_result") == "callback"
+                                                        or changes["status"] == "callback"):
+        # Listed on the Follow-ups page too: re-queued here, or for the team
+        # once Call Rules' callback limit is reached.
+        from app.services import follow_ups
+        queued = changes["status"] == "queued"
+        try:
+            await asyncio.to_thread(
+                follow_ups.add, "callback", "job call", phone=phone, name=name, when=call.get("callback_when") or "",
+                said=said, ref=call_id, job=_clean(call.get("job", {}).get("job_title") or ""),
+                due_at=call_rules.callback_at(call.get("callback_when") or "") if queued else None,
+                status="scheduled" if queued else "open",
+                note="Re-queued on the Job Calls page." if queued else
+                     "Not re-queued: Call Rules' callback limit reached or callbacks are off. Call by hand.")
+        except Exception as e:
+            logger.warning(f"Outbound call {call_id}: follow-up not recorded: {e}")
     if status == "completed" and not call.get("outcome"):
         changes["outcome"] = "no_response" if not call.get("transcript") else "unknown"
     call = await update_call(call_id, **changes)
-    if call and call["status"] in _FINAL:
-        await send_result(call)
+    if call:
+        # Every attempt is reported, including ones queued for a retry or a
+        # callback: the CRM gets what happened on this call (the attempt's
+        # status), plus whether we will call again.
+        await send_result(call, attempt_status)
 
 
 async def _mark_do_not_call(call: dict) -> None:
@@ -1061,31 +1301,111 @@ def notes_summary(call: dict) -> str:
     return "\n".join(lines)
 
 
-async def send_result(call: dict) -> bool:
-    """Send a finished job call's status back to the CRM (Result API).
+# The CRM's call-outcome API (POST /api/applicants/call-outcome) accepts
+# call_status in CRM_CALL_STATUSES and, only when answered, an outcome in
+# CRM_OUTCOMES (callback needs callback_at).
+CRM_CALL_STATUSES = ("answered", "no_answer", "busy", "voicemail", "wrong_number", "failed")
+CRM_OUTCOMES = ("interested", "not_interested", "callback", "not_looking", "do_not_call")
+# Our outcomes the CRM has no word for: what they mean for the CRM.
+_CRM_OUTCOME_FOR = {"abusive": "not_interested"}
+# Answered, but the conversation never reached an answer: reported as a
+# failed call so the CRM's re-call rules try again later.
+_UNFINISHED = {"no_response", "undecided", "unknown", "end_call", None, ""}
+
+
+def _crm_call_fields(call: dict, result_status: str) -> dict:
+    """call_status / outcome / callback_at as the CRM's call-outcome API
+    validates them, from what happened on this attempt."""
+    outcome = call.get("outcome")
+    outcome = _CRM_OUTCOME_FOR.get(outcome, outcome)
+    callback_at = None
+    if outcome == "voicemail":
+        call_status, outcome = "voicemail", None
+    elif outcome == "wrong_number" or result_status == "wrong_number":
+        call_status, outcome = "wrong_number", None
+    elif result_status in ("no_answer", "busy"):
+        call_status, outcome = result_status, None
+    elif outcome in CRM_OUTCOMES and call.get("answered_at"):
+        call_status = "answered"
+        if outcome == "callback":
+            at = call.get("next_attempt_at") if call.get("scheduled_callback") else None
+            callback_at = at or call_rules.callback_at(call.get("callback_when") or "").isoformat()
+    else:
+        # failed, dropped, hung up mid-call, or answered with no decision
+        call_status, outcome = "failed", None
+    return {"call_status": call_status, "outcome": outcome, "callback_at": callback_at}
+
+
+def _transcript_text(call: dict) -> str:
+    return "\n".join(f"{'Agent' if t.get('role') == 'agent' else 'Applicant'}: {t.get('text', '')}"
+                     for t in call.get("transcript") or [])
+
+
+def _int_id(v):
+    return int(v) if isinstance(v, str) and v.strip().isdigit() else v
+
+
+def _duration(call: dict) -> Optional[int]:
+    try:
+        start, end = call.get("answered_at"), call.get("ended_at")
+        if start and end:
+            return max(0, int((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()))
+    except ValueError:
+        pass
+    return None
+
+
+async def send_result(call: dict, attempt_status: Optional[str] = None) -> bool:
+    """Send a job call's result back to the CRM (Result API) after every
+    attempt. `attempt_status` is what happened on this call (no_answer,
+    callback, interested...) even when the call is queued again; it is kept
+    on the call so a resend reports the same thing.
     Failures are kept (result_sent False) and retried by the dialer loop."""
+    if not call:
+        return False
+    result_status = attempt_status or call.get("result_status") or call["status"]
     url = (telephony.load_settings().get("result_webhook_url") or "").strip()
+    if url:
+        # Marked as waiting to send *before* the request: if the send is cut
+        # off (backend restart, crash), the dialer loop's resend still finds it.
+        await update_call(call["id"], result_status=result_status, result_sent=False)
+    elif attempt_status:
+        await update_call(call["id"], result_status=result_status)
     if not url:
         return False
     a, j = call.get("applicant") or {}, call.get("job") or {}
+    will_retry = call["status"] == "queued"
+    summary = notes_summary(call)
     payload = {
         "event": "call.finished",
         "call_id": call["id"],
-        "contact_id": a.get("applicant_id"),
+        "applicant_id": _int_id(a.get("applicant_id")),
+        "contact_id": _int_id(a.get("applicant_id")),
         "contact_name": " ".join(x for x in (a.get("first_name"), a.get("last_name")) if x),
-        "job_id": j.get("job_id"),
+        "job_id": _int_id(j.get("job_id")),
         "job_title": j.get("job_title") or j.get("title"),
         # As your portal sent it (07… stays 07…), so it matches the record
         # instead of reading as a phone change.
         "phone": a.get("phone_original") or a.get("phone"),
         "email": a.get("email") or None,
-        "status": call["status"],
-        "outcome": call.get("outcome"),
+        # The CRM call-outcome fields: call_status, outcome, callback_at.
+        **_crm_call_fields(call, result_status),
+        "called_at": call.get("answered_at") or call.get("last_attempt_at") or call.get("ended_at"),
+        "duration_seconds": _duration(call),
+        "summary": summary or None,
+        "transcript": _transcript_text(call) or None,
+        # Our own detail, for CRMs that want it.
+        "status": result_status,                 # this attempt: interested, no_answer, callback, failed...
+        "agent_outcome": call.get("outcome"),
+        "queue_status": call["status"],          # where the call is now ("queued" = we will call again)
+        "final": not will_retry,
+        "will_retry": will_retry,
+        "next_attempt_at": call.get("next_attempt_at") if will_retry else None,
         "attempts": call.get("attempts"),
         "callback_when": call.get("callback_when"),
-        "transcript": call.get("transcript", []),
+        "transcript_lines": call.get("transcript", []),
         "notes": call.get("notes", []),
-        "notes_summary": notes_summary(call),
+        "notes_summary": summary,
         "finished_at": call.get("ended_at"),
     }
     if payload["email"]:
@@ -1112,8 +1432,8 @@ async def send_result(call: dict) -> bool:
     await update_call(call["id"], result_sent=ok, result_tries=tries, result_error=error,
                       result_sent_at=_now() if ok else call.get("result_sent_at"))
     store.put_doc("crm_results", {"last": {"at": _now(), "call_id": call["id"], "ok": ok, "error": error,
-                                           "status": call["status"], "outcome": call.get("outcome"),
-                                           "name": payload["contact_name"] or payload["phone"]}})
+                                           "status": result_status, "outcome": call.get("outcome"),
+                                           "name": payload["contact_name"] or payload.get("phone") or payload.get("email")}})
     return ok
 
 
@@ -1124,7 +1444,11 @@ _last_retry = {"at": 0.0}
 async def resend_results(force: bool = False) -> dict:
     """Send again the call statuses the CRM did not accept. Automatic
     retries stop after RESULT_MAX_TRIES; `force` (the Resend button) tries all."""
-    pending = [c for c in _load() if c.get("result_sent") is False and c.get("status") in _FINAL
+    # result_sent False: refused or cut off. None with a result_status: a
+    # send interrupted before this was marked (older records).
+    pending = [c for c in _load() if (c.get("result_sent") is False
+                                      or (c.get("result_sent") is None and c.get("result_status")))
+               and (c.get("result_status") or c.get("status") in _FINAL)
                and (force or int(c.get("result_tries") or 0) < RESULT_MAX_TRIES)]
     sent = 0
     for c in pending:

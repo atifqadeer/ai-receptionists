@@ -255,17 +255,23 @@ def _seed_history(agent, conv_id: str, chat: dict) -> None:
     agent.conversation_history[conv_id] = history
 
 
-async def _ai_reply(request: Request, chat: dict, text: str) -> Optional[str]:
+async def _ai_reply(request: Request, chat: dict, text: str) -> tuple:
+    """(reply, action): action "transfer_to_human" when the visitor asked for a person."""
     agent = _agent(request)
     conv_id = f"widget-{chat['id']}"
     # The latest visitor message is already in the chat; seed without it.
     _seed_history(agent, conv_id, {**chat, "messages": chat["messages"][:-1]})
+    # The visitor's email and name, for callback and meeting requests.
+    known = agent.chat_contacts.setdefault(conv_id, {})
+    known.setdefault("email", chat.get("email") or "")
+    if chat.get("name"):
+        known.setdefault("name", chat["name"])
     try:
         r = await agent.process_message(conv_id, text)
-        return (r.message or "").strip() or None
+        return (r.message or "").strip() or None, (r.action_data or {}).get("action", "none")
     except Exception as e:
         logger.warning(f"Widget chat {chat['id'][:8]}: AI reply failed: {e}")
-        return None
+        return None, "none"
 
 
 def _forget_idle(agent) -> None:
@@ -276,6 +282,8 @@ def _forget_idle(agent) -> None:
             _last_poll.pop(sid, None)
             agent.conversation_history.pop(f"widget-{sid}", None)
             agent.call_state.pop(f"widget-{sid}", None)
+            agent.chat_contacts.pop(f"widget-{sid}", None)
+            agent.chat_requests.pop(f"widget-{sid}", None)
 
 
 # ---- public endpoints ----
@@ -439,13 +447,21 @@ async def widget_message(request: Request):
         return {"messages": _visible(chat["messages"], after), **_ended_info(chat)}
 
     if chat.get("ai_enabled", True):
-        reply = await _ai_reply(request, chat, text)
+        reply, action = await _ai_reply(request, chat, text)
         if not reply:
             reply = "Sorry, I couldn't answer that just now. A member of our team will get back to you by email."
         async with _locks[sid]:
             chat = await asyncio.to_thread(chat_store.get_item, KIND, sid)
             if chat.get("ai_enabled", True):          # a person may have taken over meanwhile
                 _add(chat, "agent", reply)
+                if action == "transfer_to_human":
+                    # The visitor asked for a person: the AI stops, the team is
+                    # shown the chat as waiting (unread, AI paused).
+                    chat["ai_enabled"] = False
+                    chat["told_waiting"] = True
+                    chat["unread"] = int(chat.get("unread") or 0) + 1
+                    _add(chat, "system", "A member of our team will reply here shortly.")
+                    logger.info(f"Widget chat {sid[:8]}: the visitor asked for a person; AI paused")
                 await asyncio.to_thread(chat_store.put_item, KIND, chat)
     else:
         async with _locks[sid]:

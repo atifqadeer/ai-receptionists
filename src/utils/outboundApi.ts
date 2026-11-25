@@ -1,6 +1,7 @@
 // Client for VoIP settings and outbound job calls (python-backend:
 // /api/telephony and /api/outbound).
 import { API_BASE } from './agentApi';
+import { withToken } from './auth';
 
 export interface ProviderField {
   key: string;
@@ -174,7 +175,7 @@ export const telephonyApi = {
   clearInbound: () => call('/api/telephony/inbound/calls', { method: 'DELETE' }),
   inboundCall: (id: string) => call<InboundCallDetail>(`/api/telephony/inbound/calls/${id}`),
   deleteInboundCall: (id: string) => call(`/api/telephony/inbound/calls/${id}`, { method: 'DELETE' }),
-  inboundRecordingUrl: (id: string) => `${API_BASE}/api/telephony/inbound/calls/${id}/recording`,
+  inboundRecordingUrl: (id: string) => withToken(`${API_BASE}/api/telephony/inbound/calls/${id}/recording`),
   // Make a Call dial pad: the agent phones a number over the SIP Account.
   dialed: () => call<{ calls: InboundCall[] }>('/api/telephony/dialed'),
   dial: (number: string, name = '', opening = '') => call<{ id: string }>('/api/telephony/dial', { method: 'POST', body: JSON.stringify({ number, name, opening }) }),
@@ -192,7 +193,20 @@ export interface CrmPull {
   already_called?: number;
   ids?: string[];
   rejected?: Array<{ row: number; reason: string; name: string }>;
+  /** Contacts not queued on this refresh, and why. */
+  skipped?: CrmSkipped[];
   error?: string;
+}
+
+export interface CrmSkipped {
+  reason: 'already here' | 'already called' | string;
+  name: string;
+  applicant_id?: string | null;
+  job_id?: string | null;
+  job_title?: string | null;
+  phone?: string | null;
+  /** When the agent last called them (already called only). */
+  at?: string;
 }
 
 export interface CrmResultsStatus {
@@ -218,6 +232,80 @@ export const dncApi = {
   remove: (number: string) => call(`/api/outbound/dnc/${encodeURIComponent(number)}`, { method: 'DELETE' }),
 };
 
+export interface NotInterestedEntry {
+  number: string;
+  name: string;
+  /** Last time they said it. */
+  at: string;
+  first_at: string;
+  times: number;
+  source: string;
+  said?: string;
+  job?: string;
+  call_id: string;
+  /** While Call Rules still holds the number (not called until then). */
+  held_until: string | null;
+  on_dnc: boolean;
+}
+
+export interface HungUpCall {
+  call_id: string;
+  /** 'job call' | 'dial pad' | 'inbound call' | 'call' (call no longer in the history) */
+  kind: string;
+  number: string;
+  name: string;
+  job: string;
+  /** What they had decided before hanging up (e.g. interested). */
+  outcome: string;
+  at: string;
+  talk_seconds: number | null;
+  agent_last: string;
+  contact_last: string;
+  turns: number;
+  held_until: string | null;
+  on_dnc: boolean;
+}
+
+export const hungUpApi = {
+  list: () => call<{ calls: HungUpCall[] }>('/api/outbound/hung-up'),
+  release: (number: string) => call(`/api/outbound/hung-up/${encodeURIComponent(number)}/release`, { method: 'POST' }),
+};
+
+export const notInterestedApi = {
+  list: () => call<{ numbers: NotInterestedEntry[] }>('/api/outbound/not-interested'),
+  remove: (number: string) => call(`/api/outbound/not-interested/${encodeURIComponent(number)}`, { method: 'DELETE' }),
+  toDnc: (number: string) => call(`/api/outbound/not-interested/${encodeURIComponent(number)}/dnc`, { method: 'POST' }),
+};
+
+/** A callback or meeting request from chat or a call (python-backend app/services/follow_ups.py). */
+export interface FollowUp {
+  id: string;
+  kind: 'callback' | 'meeting';
+  source: string;              // chat / job call / dial pad / inbound call
+  name: string;
+  phone: string;
+  email: string;
+  when: string;                // the time they asked for, as they said it
+  due_at: string | null;
+  said: string;
+  ref: string;                 // the call or chat it came from
+  job: string;
+  auto_dial: boolean;          // the agent dials it again itself
+  round: number;
+  status: 'open' | 'scheduled' | 'dialled' | 'done' | 'failed' | 'cancelled';
+  note: string;
+  result: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const followUpsApi = {
+  list: () => call<{ items: FollowUp[] }>('/api/outbound/follow-ups'),
+  update: (id: string, changes: Partial<Pick<FollowUp, 'status' | 'auto_dial' | 'note'>>) =>
+    call<FollowUp>(`/api/outbound/follow-ups/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }),
+  remove: (id: string) => call(`/api/outbound/follow-ups/${id}`, { method: 'DELETE' }),
+};
+
 export const outboundApi = {
   crmPull: () => call<CrmPull>('/api/outbound/crm/pull', { method: 'POST' }),
   crmStatus: () => call<CrmStatus>('/api/outbound/crm/status'),
@@ -236,5 +324,5 @@ export const outboundApi = {
   removeMany: (ids: string[]) => call<{ removed: number; kept_in_progress: number }>('/api/outbound/calls/delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   preview: (id: string, body: { reset?: boolean; message?: string }) =>
     call<{ reply: string; ended: boolean; outcome: string | null }>(`/api/outbound/calls/${id}/preview`, { method: 'POST', body: JSON.stringify(body) }),
-  templateUrl: `${API_BASE}/api/outbound/template.csv`,
+  get templateUrl() { return withToken(`${API_BASE}/api/outbound/template.csv`); },
 };

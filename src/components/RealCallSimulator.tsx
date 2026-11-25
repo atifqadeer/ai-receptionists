@@ -72,6 +72,8 @@ export default function RealCallSimulator() {
       if (s.tts_active === 'deepgram') {
         const id = s.deepgram.tts_voice.replace(/^aura-2-|-en$/g, '');
         setVoiceLabel(`${id.charAt(0).toUpperCase()}${id.slice(1)} (Deepgram)`);
+      } else if (s.tts_active === 'elevenlabs') {
+        setVoiceLabel(`${s.elevenlabs.voice_name || 'ElevenLabs voice'} (ElevenLabs)`);
       } else if (s.tts_active === 'cartesia') {
         setVoiceLabel(`${s.cartesia.voice_name || 'Cartesia voice'} (Cartesia)`);
       } else {

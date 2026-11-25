@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from app.core import store
+from app.services.speakable import for_speech
 from typing import Optional
 from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
@@ -291,7 +292,7 @@ def say_and_listen(settings: dict, text: str, action_url: str, no_input_url: str
     lang = settings.get("language") or "en-GB"
     if settings.get("provider") == "vonage":
         ncco = [
-            {"action": "talk", "text": text, "language": lang, "bargeIn": True},
+            {"action": "talk", "text": for_speech(text), "language": lang, "bargeIn": True},
             {"action": "input", "type": ["speech"], "eventUrl": [action_url], "eventMethod": "POST",
              "speech": {"language": lang, "endOnSilence": 1.5, "maxDuration": 30}},
         ]
@@ -302,7 +303,7 @@ def say_and_listen(settings: dict, text: str, action_url: str, no_input_url: str
         '<?xml version="1.0" encoding="UTF-8"?><Response>'
         f'<Gather input="speech" action="{escape(action_url)}" method="POST" speechTimeout="auto" '
         f'timeout="6" language="{escape(lang)}">'
-        f'<Say{voice_attr} language="{escape(lang)}">{escape(text)}</Say></Gather>'
+        f'<Say{voice_attr} language="{escape(lang)}">{escape(for_speech(text))}</Say></Gather>'
         f'<Redirect method="POST">{escape(no_input_url)}</Redirect></Response>'
     )
     return xml, "application/xml"
@@ -311,11 +312,11 @@ def say_and_listen(settings: dict, text: str, action_url: str, no_input_url: str
 def say_and_hangup(settings: dict, text: str) -> tuple:
     lang = settings.get("language") or "en-GB"
     if settings.get("provider") == "vonage":
-        return json.dumps([{"action": "talk", "text": text, "language": lang}]), "application/json"
+        return json.dumps([{"action": "talk", "text": for_speech(text), "language": lang}]), "application/json"
     voice = _voice(settings)
     voice_attr = f' voice="{escape(voice)}"' if voice else ""
     xml = ('<?xml version="1.0" encoding="UTF-8"?><Response>'
-           f'<Say{voice_attr} language="{escape(lang)}">{escape(text)}</Say><Hangup/></Response>')
+           f'<Say{voice_attr} language="{escape(lang)}">{escape(for_speech(text))}</Say><Hangup/></Response>')
     return xml, "application/xml"
 
 

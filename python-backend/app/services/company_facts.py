@@ -32,9 +32,25 @@ PATTERNS = {
         r"\b((office|opening|business|working) hours of (the|your) (company|office)|(your|the) (office|opening|business) hours|"
         r"when (is|are) (your|the) (office|company) open|when are you open|what time do you (open|close))\b"),
     "company_address": (
-        r"\b((your|the|company|office|agency)('?s)? (address|location|postcode)|(your|the) (office|company) address|"
-        r"address of (your|the) (company|office|agency)|where (is|are) (your|the) (office|company|agency|business)|"
-        r"where are you (based|located)|company address|where can i (find|visit) you)\b"),
+        r"\b((your|the|company|office|agency)('?s)? (address|location|postcode|post code|zip code|whereabouts)|"
+        r"(your|the) (office|company) address|(office|physical|postal|mailing|full|exact|business) address|"
+        r"address of (your|the) (company|office|agency|business)|"
+        r"where (is|are) (your|the) (office|offices|company|agency|business|premises|headquarters|hq|head office|branch)|"
+        r"where('?s| is) (your|the) (office|company|agency|head office|headquarters|branch)|"
+        r"where are you(?! calling)( guys| people)?( based| located| situated| from)?\W*$|"
+        r"where are you (based|located|situated)|where do you (operate|work) from|"
+        r"(head|main) office|(office|company) (is )?(located|based|situated)|located where|"
+        r"company address|where can i (find|visit|meet) you|"
+        r"(how|where) (do|can|could|would|should) i (get|go|come|find|reach|visit)( to)? (you|your (office|company|agency)|the office)|"
+        r"directions to (you|your|the) ?(office|company)?|(visit|come to|drop by|walk in to) (you|your|the) (office|company|agency)|"
+        r"(send|post|mail) (my )?(cv|documents|letter|post) to\b.*\baddress|what is your address|your address)\b"),
+    # "What services do you offer?" / "What does your company do?"
+    "company_services": (
+        r"\b(what (services|kind of services|type of services|service) (do|does|can|will) (you|u|your (company|agency|team)|the (company|agency))( guys)? (offer|provide|do|have|give)|"
+        r"(your|the company'?s|the agency'?s) services|services (do you|you) (offer|provide)|"
+        r"what (kind|type|sort) of (company|business|agency|firm) (is (this|it)|are you)|"
+        r"what (does|do) (your|the) (company|agency|business|firm) do|what do you (guys )?do\W*$|"
+        r"what is (your|the) (company|business|agency) about)\b"),
     "company_contact": (
         r"\b((your|the|company'?s?|office|agency) (phone|telephone|contact|email|e-mail)( number| address| details)?|"
         r"how (can|do|could) i (contact|reach|call|email|get (hold|in touch)( of| with)?) (you|the company|your (team|office))|"
@@ -55,11 +71,25 @@ PATTERNS = {
 _COMPILED = [(name, re.compile(p, re.I)) for name, p in PATTERNS.items()]
 
 
-def detect(text: str) -> Optional[str]:
-    """The company question asked in `text`, or None."""
+_WHERE = re.compile(r"\b(where|location|located|address|based|situated|postcode|directions|office)\b", re.I)
+_NAME_SKIP = {"the", "ltd", "limited", "llc", "inc", "plc", "and", "co", "company", "group"}
+
+
+def names_company(text: str, company: str) -> bool:
+    """`text` names the company ("Kingsbury Personnel", or just "Kingsbury")."""
+    words = [w for w in re.findall(r"[a-z0-9]+", (company or "").lower()) if w not in _NAME_SKIP and len(w) > 2]
+    low = (text or "").lower()
+    return bool(words) and (" ".join(words) in low or words[0] in re.findall(r"[a-z0-9]+", low))
+
+
+def detect(text: str, company: str = "") -> Optional[str]:
+    """The company question asked in `text`, or None. company: its name,
+    so "where is Kingsbury Personnel?" asks for the office address."""
     for name, pat in _COMPILED:
         if pat.search(text or ""):
             return name
+    if company and _WHERE.search(text or "") and names_company(text, company):
+        return "company_address"
     return None
 
 
@@ -72,7 +102,7 @@ def _join(items: list) -> str:
 
 
 def answer(intent: str, company: str, profile: dict, roles: Optional[list] = None,
-           calling: bool = False) -> Optional[str]:
+           calling: bool = False, overview: str = "") -> Optional[str]:
     """The answer to a company question. profile: Agent Setup's knowledge
     base (address, phone, email, business_hours, services). calling: we
     phoned them ("I'm calling from ..."), rather than them us."""
@@ -90,6 +120,14 @@ def answer(intent: str, company: str, profile: dict, roles: Optional[list] = Non
     if intent == "roles":
         listed = _join(roles) if roles else _clean(profile.get("services") or "")
         return f"{company} recruits for {listed} positions." if listed else None
+    if intent == "company_services":
+        # The company introduction from the knowledge documents, and the roles.
+        listed = _join(roles) if roles else _clean(profile.get("services") or "")
+        parts = [overview.strip()] if overview.strip() else []
+        if listed:
+            parts.append(f"We recruit for {listed} positions." if overview.strip() else
+                         f"{company} recruits for {listed} positions.")
+        return " ".join(parts) or None
     if intent == "company_address":
         a = _clean(profile.get("address") or "")
         return f"Our office address is {a}." if a else None

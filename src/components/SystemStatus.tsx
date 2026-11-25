@@ -17,7 +17,7 @@ const STYLE: Record<State, { box: string; icon: string; pill: string }> = {
   off: { box: 'bg-gray-800/30 border-gray-700/50', icon: 'text-gray-500', pill: 'bg-gray-700 text-gray-400' },
 };
 
-const NAMES: Record<string, string> = { deepgram: 'Deepgram', cartesia: 'Cartesia', windows: 'Windows voice', local: 'this PC (Whisper / Vosk)' };
+const NAMES: Record<string, string> = { deepgram: 'Deepgram', cartesia: 'Cartesia', elevenlabs: 'ElevenLabs', windows: 'Windows voice', local: 'this PC (Whisper / Vosk)' };
 
 // Where to change it: a Settings tab, or ("@...") a page in the sidebar.
 const place = (where: string) => (where.startsWith('@') ? where.slice(1) : `Settings › ${where}`);

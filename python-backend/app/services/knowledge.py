@@ -13,6 +13,7 @@ a bare heading or the FAQ question itself.
 
 import math
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -423,6 +424,24 @@ class KnowledgeBase:
     def search(self, question: str, topic: Optional[str] = None) -> Optional[str]:
         return self.search_detail(question, topic)[0]
 
+    def faq_answer(self, question: str, min_similarity: float = 0.75) -> Optional[str]:
+        """The answer of the documents' FAQ (Q:/A: pair) whose question is
+        the one asked: the same key words and close wording. None when no
+        FAQ question matches that closely."""
+        q = key_words(question)
+        if not q:
+            return None
+        said = " ".join(re.findall(r"[a-z0-9]+", question.lower()))
+        best, best_ratio = None, 0.0
+        for u in self.units:
+            if u.kind != "qa" or not u.answer or self._fields[id(u)]["head"] != q:
+                continue
+            asked = " ".join(re.findall(r"[a-z0-9]+", u.heading.lower()))
+            ratio = SequenceMatcher(None, said, asked).ratio()
+            if ratio > best_ratio:
+                best, best_ratio = u, ratio
+        return best.answer if best is not None and best_ratio >= min_similarity else None
+
     def search_detail(self, question: str, topic: Optional[str] = None) -> tuple:
         """(answer, ref) for a question; ref names the section answered
         from, for "tell me more". topic: the role being discussed, used
@@ -492,6 +511,19 @@ class KnowledgeBase:
             if "price" in matched & q_asked:
                 score += idf.get("price", 1.0) * w_head
             score *= (len(matched & q_asked) / len(q_asked)) ** 2
+            # An FAQ whose question is the one asked wins: "how can I apply
+            # for a job" is the FAQ "How can I apply for a job?", not "Can I
+            # apply for more than one position?" (which shares its words).
+            if u.kind == "qa" and f["head"]:
+                overlap = len(q_asked & f["head"]) / len(q_asked | f["head"])
+                if overlap > 0.66:
+                    score *= 1 + 2 * overlap
+                if q_asked == f["head"]:
+                    # Same key words ("more than one" are filler words):
+                    # the closer wording wins.
+                    said = " ".join(re.findall(r"[a-z0-9]+", lower))
+                    asked = " ".join(re.findall(r"[a-z0-9]+", u.heading.lower()))
+                    score += 100 * (1 + SequenceMatcher(None, said, asked).ratio())
             # Ties go to the more focused text: "how do I start a project"
             # picks "To start a project, email ..." over a longer line that
             # merely mentions both words.

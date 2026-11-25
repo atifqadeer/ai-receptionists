@@ -112,6 +112,13 @@ _CALLBACK = [
     r"\b(not|isn'?t) a (good|great) time\b|\bbad time\b",
     r"\b(i'?m|im|i am) (driving|at work|in a meeting|busy|working|on the other line|in the middle of something|out)\b",
     r"\bcan'?t (talk|speak) (right )?now\b",
+    # "when I'm free I'll call you back" / "I'll get back to you"
+    r"\b(i'?ll|i will|let me) (call|ring|phone|get back to|contact) (you|ya)( back| later)?\b",
+    r"\bwhen (i'?m|i am|i get) (free|home|back|off work|a (minute|moment|chance))\b",
+    r"\b(call|ring) me (when|later|after)\b",
+    # "call me on Monday afternoon", "ring me at 3pm", "phone me tomorrow"
+    r"\b(call|ring|phone|try) me (back |again )?(on|at|around|after|tomorrow|today|tonight|next|this|in the) ?"
+    r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d|morning|afternoon|evening|week|noon)",
 ]
 
 # "Drop the call" / "hang up" ("don't hang up" is the opposite).
@@ -157,13 +164,27 @@ def _any(patterns: list, text: str) -> bool:
     return any(re.search(p, text) for p in patterns)
 
 
+# A live person asking to leave a message ("can I leave a message for the
+# recruiter?") is not an answering machine: the agent used to read its
+# voicemail line and hang up on them. A machine says "after the tone".
+_SELF_REQUEST = re.compile(r"\b(can|could|may|shall|should) i\b|\bi('?d| would)? ?(like|want|wanna|need) to\b|"
+                           r"\b(leave|take) me a\b|\?\s*$")
+_MACHINE_ONLY = re.compile(r"\bafter the (tone|beep)\b|\bnot available to take your call\b|"
+                           r"\b(the person|the number|the customer|the subscriber) you (are|have) (calling|called|dialled|dialed)\b|"
+                           r"\byou (have|'?ve) reached\b|\bmailbox (is )?full\b")
+
+
+def _asks_to_leave_message(t: str) -> bool:
+    return bool(_SELF_REQUEST.search(t)) and not _MACHINE_ONLY.search(t)
+
+
 def detect(text: str, allow_voicemail: bool = True) -> Optional[str]:
     """The decision in `text`, or None. Order matters: a refusal wins over
     everything else ("not interested, don't call me again" is a DNC)."""
     t = normalize(text)
     if not t:
         return None
-    if allow_voicemail and _any(_VOICEMAIL, t) and len(t.split()) >= 4:
+    if allow_voicemail and _any(_VOICEMAIL, t) and len(t.split()) >= 4 and not _asks_to_leave_message(t):
         return "voicemail"
     if _any(_DNC, t):
         # "Why don't you call me tomorrow" / "don't call me at work, call
@@ -198,11 +219,40 @@ def is_bare_no(text: str) -> bool:
     return bool(_BARE_NO.search(normalize(text)))
 
 
+_WHEN = re.compile(
+    r"\b(later( today| on)?|today|tomorrow( morning| afternoon| evening)?|tonight|(this|in the) (morning|afternoon|evening)|"
+    r"next (week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)( morning| afternoon| evening)?|"
+    r"(on |this )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)( morning| afternoon| evening)?|"
+    r"in (a|an|\d+|half an) (hour|hours|minute|minutes|bit)|"
+    r"(at|after|around|about|by) \d{1,2}([:.]\d\d)?( ?(am|pm|o'?clock))?|\d{1,2}([:.]\d\d)? ?(am|pm)|"
+    r"(at |around )?(noon|midday|lunch ?time)|another time)\b")
+
+
 def callback_when(text: str) -> str:
-    """The time the person asked to be called back at, as they said it."""
+    """The time the person asked for (a callback or a meeting), as they said
+    it: "tomorrow morning", "Thursday at 2pm", "in 2 hours"; "" when they
+    named none."""
     t = normalize(text)
-    m = re.search(r"\b(later( today| on)?|tomorrow( morning| afternoon| evening)?|tonight|(this|in the) (morning|afternoon|evening)|"
-                  r"next (week|month|monday|tuesday|wednesday|thursday|friday)|on (monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
-                  r"in (a|an|\d+|half an) (hour|hours|minute|minutes|bit)|after \d+( ?(am|pm|o'?clock))?|at \d+( ?(am|pm|o'?clock|:\d\d))?|"
-                  r"another time)\b", t)
-    return m.group(0) if m else ""
+    # "I have a meeting at 3, call me back after 5pm": the time after "call me".
+    asked = list(re.finditer(r"\b(call|ring|phone|try|contact) (me|us)\b", t))
+    if asked and _WHEN.search(t, asked[-1].end()):
+        t = t[asked[-1].end():]
+    parts = [m.group(0) for m in _WHEN.finditer(t)]
+    when = " ".join(dict.fromkeys(parts))
+    return re.sub(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", lambda m: m.group(1).title(), when)
+
+
+# "Can you schedule a meeting with the recruiter?", "I'd like to book an
+# appointment", "can we arrange an interview".
+_MEETING = re.compile(
+    r"\b((schedule|book|arrange|set ?up|organi[sz]e|fix|make|get|request|want|need|like)( me)?( in for)? (a |an |the |my )?"
+    r"(meeting|appointment|interview|call with|chat with|video call|zoom|teams call|face to face)|"
+    r"(meet|speak|talk) (with |to )?(the |a |your )?(recruiter|recruitment team|consultant|someone|manager|human|person)|"
+    r"(meeting|appointment|interview) with (the |a |your )?(recruiter|recruitment team|consultant|team|someone|you)|"
+    r"(when|can|could) (can |could )?(i|we) (meet|come in|visit)|"
+    r"book me in|(book|schedule|arrange) (it|one|that|a time|a slot))\b")
+
+
+def is_meeting_request(text: str) -> bool:
+    """They ask for a meeting, appointment or interview with the team."""
+    return bool(_MEETING.search(normalize(text)))

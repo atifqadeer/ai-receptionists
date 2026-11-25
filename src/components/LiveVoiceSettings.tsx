@@ -1,33 +1,56 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { voiceApi, VoiceSettings, LiveVoice, TtsProvider, SttProvider } from '../utils/voiceApi';
+import { voiceApi, VoiceSettings, LiveVoice, TtsProvider, SttProvider, Cloud, VoiceMode } from '../utils/voiceApi';
 
-// Settings > Agent > Identity & Voice: the agent's live voice (Deepgram
-// Aura or Cartesia Sonic) and how callers are heard (Deepgram Nova or
-// Cartesia Ink). Saved in MySQL by the backend; used on phone calls and
-// in the browser test call.
+// Settings > Calling > Call Voice. One card picks the whole voice stack:
+// - Deepgram: Deepgram does everything on phone calls (Voice Agent API:
+//   Nova-3 hears, an LLM run by Deepgram thinks, Aura-2 speaks)
+// - Cartesia / ElevenLabs: that provider hears and speaks; the answers
+//   come from Settings > System > AI Model
+// - Standard: each part chosen separately, as before
+// Saved in MySQL by the backend; used on phone calls and in the browser test call.
 
-type Cloud = 'deepgram' | 'cartesia';
+const CLOUDS: Cloud[] = ['deepgram', 'cartesia', 'elevenlabs'];
+
+const MODE_CARDS: { id: VoiceMode; label: string; tagline: string; icon: string; parts: string[] }[] = [
+  { id: 'deepgram', label: 'Deepgram', tagline: 'All-in-one Voice Agent', icon: 'fa-wave-square',
+    parts: ['Hears: Nova-3', 'Thinks: LLM run by Deepgram', 'Speaks: Aura-2'] },
+  { id: 'cartesia', label: 'Cartesia', tagline: 'Ultra-fast voices', icon: 'fa-bolt',
+    parts: ['Hears: Ink', 'Thinks: your AI Model', 'Speaks: Sonic'] },
+  { id: 'elevenlabs', label: 'ElevenLabs', tagline: 'Most expressive voices', icon: 'fa-microphone-lines',
+    parts: ['Hears: Scribe', 'Thinks: your AI Model', 'Speaks: ElevenLabs voices'] },
+  { id: 'standard', label: 'Standard', tagline: 'Mix & match', icon: 'fa-sliders',
+    parts: ['Pick the voice and the hearing separately', 'Thinks: your AI Model'] },
+];
 
 const TTS_OPTIONS: { id: TtsProvider; label: string; sub: string; icon: string }[] = [
   { id: 'deepgram', label: 'Deepgram Aura-2', sub: 'Natural, low latency', icon: 'fa-wave-square' },
   { id: 'cartesia', label: 'Cartesia Sonic', sub: 'Expressive, ultra-fast', icon: 'fa-bolt' },
+  { id: 'elevenlabs', label: 'ElevenLabs', sub: 'Most lifelike', icon: 'fa-microphone-lines' },
   { id: 'windows', label: 'Windows voice', sub: 'Offline, robotic', icon: 'fa-desktop' },
 ];
 
 const STT_OPTIONS: { id: SttProvider; label: string; sub: string; icon: string }[] = [
   { id: 'deepgram', label: 'Deepgram Nova', sub: 'Most accurate on phone lines', icon: 'fa-ear-listen' },
   { id: 'cartesia', label: 'Cartesia Ink', sub: 'Whisper-based, fast', icon: 'fa-pen-nib' },
+  { id: 'elevenlabs', label: 'ElevenLabs Scribe', sub: 'Many languages', icon: 'fa-closed-captioning' },
   { id: 'local', label: 'On this PC', sub: 'Whisper / Vosk, offline', icon: 'fa-microchip' },
 ];
 
 const PROVIDER_NAME: Record<string, string> = {
-  deepgram: 'Deepgram', cartesia: 'Cartesia', windows: 'Windows voice', local: 'this PC',
+  deepgram: 'Deepgram', cartesia: 'Cartesia', elevenlabs: 'ElevenLabs', windows: 'Windows voice', local: 'this PC',
 };
 
 const KEY_LINKS: Record<Cloud, string> = {
   deepgram: 'https://console.deepgram.com/',
   cartesia: 'https://play.cartesia.ai/keys',
+  elevenlabs: 'https://elevenlabs.io/app/settings/api-keys',
 };
+
+const LLM_PROVIDER_NAME: Record<string, string> = {
+  open_ai: 'OpenAI', anthropic: 'Anthropic (Claude)', google: 'Google (Gemini)', groq: 'Groq',
+};
+
+const selectCls = 'mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 outline-none';
 
 function Segmented<T extends string>({ options, value, onChange }: {
   options: { id: T; label: string; sub: string; icon: string }[];
@@ -35,7 +58,7 @@ function Segmented<T extends string>({ options, value, onChange }: {
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
       {options.map((o) => {
         const active = o.id === value;
         return (
@@ -55,13 +78,22 @@ function Segmented<T extends string>({ options, value, onChange }: {
   );
 }
 
+function Result({ r }: { r?: { ok: boolean; message: string } }) {
+  if (!r) return null;
+  return (
+    <p className={`text-xs ${r.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+      <i className={`fa-solid ${r.ok ? 'fa-circle-check' : 'fa-circle-xmark'} mr-1.5`}></i>{r.message}
+    </p>
+  );
+}
+
 export default function LiveVoiceSettings({ agentName, companyName }: { agentName: string; companyName: string }) {
   const [settings, setSettings] = useState<VoiceSettings | null>(null);
   const [loadError, setLoadError] = useState('');
   const [notice, setNotice] = useState('');
-  const [keys, setKeys] = useState<Record<Cloud, string>>({ deepgram: '', cartesia: '' });
-  const [testing, setTesting] = useState<Cloud | ''>('');
-  const [testResult, setTestResult] = useState<Partial<Record<Cloud, { ok: boolean; message: string }>>>({});
+  const [keys, setKeys] = useState<Record<Cloud, string>>({ deepgram: '', cartesia: '', elevenlabs: '' });
+  const [testing, setTesting] = useState<Cloud | 'agent' | ''>('');
+  const [testResult, setTestResult] = useState<Partial<Record<Cloud | 'agent', { ok: boolean; message: string }>>>({});
   const [voices, setVoices] = useState<Partial<Record<Cloud, LiveVoice[]>>>({});
   const [voicesError, setVoicesError] = useState('');
   const [loadingVoices, setLoadingVoices] = useState(false);
@@ -85,9 +117,11 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
     }
   };
 
-  const ttsCloud: Cloud | null = settings && settings.tts_provider !== 'windows' ? settings.tts_provider as Cloud : null;
+  const mode: VoiceMode = settings?.mode ?? 'standard';
+  // The voice provider of the selected card (or the Standard card's choice).
+  const ttsCloud: Cloud | null = settings && settings.tts_chosen !== 'windows' ? settings.tts_chosen as Cloud : null;
+  const sttChosen: SttProvider | undefined = settings?.stt_chosen;
 
-  // The voice list of the selected voice provider.
   useEffect(() => {
     if (!ttsCloud || voices[ttsCloud]) return;
     setLoadingVoices(true);
@@ -95,20 +129,11 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
     voiceApi.voices(ttsCloud)
       .then((r) => {
         setVoices((v) => ({ ...v, [ttsCloud]: r.voices }));
-        if (r.needs_key && ttsCloud === 'cartesia') setVoicesError('Add your Cartesia API key above to load its voices.');
+        if (r.needs_key && ttsCloud !== 'deepgram') setVoicesError(`Add your ${PROVIDER_NAME[ttsCloud]} API key above to load its voices.`);
       })
       .catch((e) => setVoicesError(e.message))
       .finally(() => setLoadingVoices(false));
   }, [ttsCloud, voices]);
-
-  const saveKey = async (p: Cloud) => {
-    const key = keys[p].trim();
-    if (!key) return;
-    await save({ [p]: { api_key: key } }, `${PROVIDER_NAME[p]} API key saved`);
-    setKeys((k) => ({ ...k, [p]: '' }));
-    setVoices((v) => ({ ...v, [p]: undefined }));     // reload the voices with the new key
-    runTest(p);
-  };
 
   const runTest = async (p: Cloud) => {
     setTesting(p);
@@ -123,15 +148,37 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
     }
   };
 
+  const runAgentTest = async () => {
+    setTesting('agent');
+    try {
+      const r = await voiceApi.testAgent();
+      setTestResult((t) => ({ ...t, agent: r }));
+      load();
+    } catch (e: any) {
+      setTestResult((t) => ({ ...t, agent: { ok: false, message: e.message } }));
+    } finally {
+      setTesting('');
+    }
+  };
+
+  const saveKey = async (p: Cloud) => {
+    const key = keys[p].trim();
+    if (!key) return;
+    await save({ [p]: { api_key: key } }, `${PROVIDER_NAME[p]} API key saved`);
+    setKeys((k) => ({ ...k, [p]: '' }));
+    setVoices((v) => ({ ...v, [p]: undefined }));     // reload the voices with the new key
+    runTest(p);
+  };
+
+  const ttsModel = (p: Cloud) =>
+    p === 'cartesia' ? settings?.cartesia.tts_model : p === 'elevenlabs' ? settings?.elevenlabs.tts_model : undefined;
+
   const preview = (v: LiveVoice) => {
     if (!ttsCloud) return;
     audioRef.current?.pause();
     if (playing === v.id) { setPlaying(''); return; }
     const sample = `Hello! I'm ${agentName || 'your assistant'} from ${companyName || 'our company'}. How can I help you today?`;
-    const audio = new Audio(voiceApi.speakUrl(sample, {
-      provider: ttsCloud, voiceId: v.id,
-      model: ttsCloud === 'cartesia' ? settings?.cartesia.tts_model : undefined,
-    }));
+    const audio = new Audio(voiceApi.speakUrl(sample, { provider: ttsCloud, voiceId: v.id, model: ttsModel(ttsCloud) }));
     audioRef.current = audio;
     setPlaying(v.id);
     audio.onended = () => setPlaying('');
@@ -141,8 +188,8 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
 
   const selectVoice = (v: LiveVoice) => {
     if (ttsCloud === 'deepgram') save({ deepgram: { tts_voice: v.id } }, `Voice set to ${v.name}`);
-    if (ttsCloud === 'cartesia') save({ cartesia: { voice_id: v.id, voice_name: v.name, voice_gender: v.gender } },
-      `Voice set to ${v.name}`);
+    if (ttsCloud === 'cartesia' || ttsCloud === 'elevenlabs')
+      save({ [ttsCloud]: { voice_id: v.id, voice_name: v.name, voice_gender: v.gender } }, `Voice set to ${v.name}`);
   };
 
   const list = useMemo(() => {
@@ -170,14 +217,18 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
     );
   }
 
-  const selectedVoiceId = ttsCloud === 'deepgram' ? settings.deepgram.tts_voice : settings.cartesia.voice_id;
-  const fellBack = settings.tts_provider !== settings.tts_active;
-  const sttFellBack = settings.stt_provider !== settings.stt_active;
+  const selectedVoiceId = ttsCloud === 'deepgram' ? settings.deepgram.tts_voice
+    : ttsCloud ? settings[ttsCloud].voice_id : '';
+  const fellBack = settings.tts_chosen !== settings.tts_active;
+  const sttFellBack = settings.stt_chosen !== settings.stt_active;
+  const keyClouds: Cloud[] = mode === 'standard' ? CLOUDS : [mode];
+  const dg = settings.deepgram;
+  const llmModels = settings.agent_llms[dg.agent_llm_provider] || [];
 
   return (
     <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-6 relative">
       {notice && (
-        <div className="absolute top-4 right-4 text-xs bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-lg">
+        <div className="absolute top-4 right-4 text-xs bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-lg z-10">
           <i className="fa-solid fa-check mr-1.5"></i>{notice}
         </div>
       )}
@@ -187,7 +238,7 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
           Live Voice
         </h3>
         <p className="text-sm text-gray-400 mt-1">
-          The agent speaks and listens through a live AI voice service on phone calls and in the browser test call.
+          Choose who hears callers, thinks of the answers and speaks them on phone calls and in the browser test call.
           Saved instantly to the database.
         </p>
       </div>
@@ -198,18 +249,72 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
         </p>
       )}
 
+      {/* Voice stack cards */}
+      <section className="space-y-3">
+        <h4 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+          <i className="fa-solid fa-layer-group text-xs text-gray-500"></i>Voice stack
+        </h4>
+        <div role="radiogroup" aria-label="Voice stack" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+          {MODE_CARDS.map((c) => {
+            const active = c.id === mode;
+            const ready = c.id === 'standard' || !!settings[c.id as Cloud]?.key_source;
+            return (
+              <button key={c.id} type="button" role="radio" aria-checked={active}
+                onClick={() => !active && save({ mode: c.id }, `${c.label} selected`)}
+                className={`relative text-left rounded-xl border p-4 transition-all overflow-hidden ${
+                  active
+                    ? 'border-violet-500/60 bg-gradient-to-br from-violet-600/20 via-indigo-600/10 to-transparent shadow-lg shadow-violet-900/20'
+                    : 'border-gray-700/80 bg-gray-800/30 hover:border-gray-600'}`}>
+                <div className="flex items-center gap-3">
+                  <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+                    active ? 'bg-gradient-to-br from-violet-500 to-indigo-600 text-white' : 'bg-gray-800 text-gray-400'}`}>
+                    <i className={`fa-solid ${c.icon} text-sm`}></i>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className={`text-sm font-semibold ${active ? 'text-white' : 'text-gray-200'}`}>{c.label}</p>
+                    <p className="text-xs text-gray-500 truncate">{c.tagline}</p>
+                  </div>
+                  {active && <i className="fa-solid fa-circle-check text-violet-400"></i>}
+                </div>
+                <ul className="mt-3 space-y-1">
+                  {c.parts.map((part) => (
+                    <li key={part} className="text-xs text-gray-400 flex items-start gap-1.5">
+                      <i className="fa-solid fa-angle-right text-[10px] text-gray-600 mt-1"></i>{part}
+                    </li>
+                  ))}
+                </ul>
+                {!ready && <p className="mt-2 text-[11px] text-amber-300/90">Needs an API key</p>}
+              </button>
+            );
+          })}
+        </div>
+        {mode === 'deepgram' && (
+          <p className={`text-xs flex items-start gap-2 ${settings.agent_active ? 'text-emerald-300' : 'text-amber-300'}`}>
+            <i className={`fa-solid ${settings.agent_active ? 'fa-circle-check' : 'fa-triangle-exclamation'} mt-0.5`}></i>
+            {settings.agent_active
+              ? 'Phone calls run on the Deepgram Voice Agent: Deepgram hears the caller, thinks of the answer and speaks it, over one connection. Your agent\'s instructions, knowledge base and Call Rules still apply.'
+              : 'Add a working Deepgram API key: until then calls use the Standard pipeline.'}
+          </p>
+        )}
+        {(mode === 'cartesia' || mode === 'elevenlabs') && (
+          <p className="text-xs text-gray-500 flex items-start gap-2">
+            <i className="fa-solid fa-circle-info mt-0.5"></i>
+            {PROVIDER_NAME[mode]} hears and speaks; the answers come from Settings › System › AI Model.
+          </p>
+        )}
+      </section>
+
       {/* API keys */}
       <section className="space-y-3">
         <h4 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
-          <i className="fa-solid fa-key text-xs text-gray-500"></i>API keys
+          <i className="fa-solid fa-key text-xs text-gray-500"></i>{keyClouds.length > 1 ? 'API keys' : 'API key'}
         </h4>
-        {(['deepgram', 'cartesia'] as Cloud[]).map((p) => {
+        {keyClouds.map((p) => {
           const info = settings[p];
-          const result = testResult[p];
           return (
             <div key={p} className="rounded-lg border border-gray-700/70 bg-gray-800/40 p-3 space-y-2">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium text-white w-20">{PROVIDER_NAME[p]}</span>
+                <span className="text-sm font-medium text-white w-24">{PROVIDER_NAME[p]}</span>
                 {info.key_rejected ? (
                   <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/15 text-red-300">Key rejected</span>
                 ) : info.key_source ? (
@@ -237,15 +342,55 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
                   {testing === p ? <i className="fa-solid fa-spinner fa-spin"></i> : 'Test'}
                 </button>
               </div>
-              {result && (
-                <p className={`text-xs ${result.ok ? 'text-emerald-300' : 'text-red-300'}`}>
-                  <i className={`fa-solid ${result.ok ? 'fa-circle-check' : 'fa-circle-xmark'} mr-1.5`}></i>{result.message}
-                </p>
-              )}
+              <Result r={testResult[p]} />
             </div>
           );
         })}
       </section>
+
+      {/* Deepgram Voice Agent brain */}
+      {mode === 'deepgram' && (
+        <section className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+              <i className="fa-solid fa-brain text-xs text-gray-500"></i>AI model (run by Deepgram)
+            </h4>
+            <button type="button" onClick={runAgentTest} disabled={testing === 'agent' || !dg.key_source}
+              className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-300 hover:text-white hover:border-gray-500 disabled:opacity-40">
+              {testing === 'agent' ? <i className="fa-solid fa-spinner fa-spin"></i> : <><i className="fa-solid fa-plug mr-1.5"></i>Test Voice Agent</>}
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <label className="text-xs text-gray-400">Provider
+              <select value={dg.agent_llm_provider} className={selectCls}
+                onChange={(e) => save({ deepgram: { agent_llm_provider: e.target.value,
+                  agent_llm_model: (settings.agent_llms[e.target.value] || [''])[0] } })}>
+                {Object.keys(settings.agent_llms).map((p) => <option key={p} value={p}>{LLM_PROVIDER_NAME[p] || p}</option>)}
+              </select>
+            </label>
+            <label className="text-xs text-gray-400">Model
+              <select value={dg.agent_llm_model} className={selectCls}
+                onChange={(e) => save({ deepgram: { agent_llm_model: e.target.value } })}>
+                {!llmModels.includes(dg.agent_llm_model) && <option value={dg.agent_llm_model}>{dg.agent_llm_model}</option>}
+                {llmModels.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </label>
+            <label className="text-xs text-gray-400">Creativity ({dg.agent_temperature})
+              <input type="range" min={0} max={1} step={0.1} value={Number(dg.agent_temperature) || 0}
+                onChange={(e) => setSettings({ ...settings, deepgram: { ...dg, agent_temperature: e.target.value } })}
+                onMouseUp={(e) => save({ deepgram: { agent_temperature: (e.target as HTMLInputElement).value } })}
+                onKeyUp={(e) => save({ deepgram: { agent_temperature: (e.target as HTMLInputElement).value } })}
+                className="mt-3 w-full accent-violet-500" />
+            </label>
+          </div>
+          <Result r={testResult.agent} />
+          <p className="text-xs text-gray-500 leading-relaxed">
+            Deepgram runs and bills this model with your Deepgram key; no other AI key is needed. It gets your agent's
+            instructions and knowledge (Agent Setup), can look up the knowledge base, and records the call outcome
+            (interested, call back, do not call…). Settings › System › AI Model is still used for website chat.
+          </p>
+        </section>
+      )}
 
       {/* Agent voice */}
       <section className="space-y-3">
@@ -254,25 +399,25 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
             <i className="fa-solid fa-volume-high text-xs text-gray-500"></i>Agent voice
           </h4>
           <span className={`text-xs px-2 py-0.5 rounded-full ${fellBack ? 'bg-amber-500/15 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'}`}>
-            {fellBack ? `Using ${PROVIDER_NAME[settings.tts_active]} until ${PROVIDER_NAME[settings.tts_provider]} is set up`
+            {fellBack ? `Using ${PROVIDER_NAME[settings.tts_active]} until ${PROVIDER_NAME[settings.tts_chosen]} is set up`
               : `Live: ${PROVIDER_NAME[settings.tts_active]}`}
           </span>
         </div>
-        <Segmented options={TTS_OPTIONS} value={settings.tts_provider} onChange={(v) => save({ tts_provider: v })} />
+        {mode === 'standard' && (
+          <Segmented options={TTS_OPTIONS} value={settings.tts_provider} onChange={(v) => save({ tts_provider: v })} />
+        )}
 
         {ttsCloud === 'cartesia' && (
           <div className="grid grid-cols-2 gap-3">
             <label className="text-xs text-gray-400">Model
-              <select value={settings.cartesia.tts_model} onChange={(e) => save({ cartesia: { tts_model: e.target.value } })}
-                className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 outline-none">
+              <select value={settings.cartesia.tts_model} onChange={(e) => save({ cartesia: { tts_model: e.target.value } })} className={selectCls}>
                 <option value="sonic-2">Sonic 2 (best quality)</option>
                 <option value="sonic-turbo">Sonic Turbo (lowest latency)</option>
                 <option value="sonic-3">Sonic 3</option>
               </select>
             </label>
             <label className="text-xs text-gray-400">Speaking speed
-              <select value={settings.cartesia.speed} onChange={(e) => save({ cartesia: { speed: e.target.value } })}
-                className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 outline-none">
+              <select value={settings.cartesia.speed} onChange={(e) => save({ cartesia: { speed: e.target.value } })} className={selectCls}>
                 <option value="slowest">Slowest</option>
                 <option value="slow">Slow</option>
                 <option value="normal">Normal</option>
@@ -281,6 +426,15 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
               </select>
             </label>
           </div>
+        )}
+        {ttsCloud === 'elevenlabs' && (
+          <label className="block text-xs text-gray-400 max-w-xs">Model
+            <select value={settings.elevenlabs.tts_model} onChange={(e) => save({ elevenlabs: { tts_model: e.target.value } })} className={selectCls}>
+              <option value="eleven_flash_v2_5">Flash v2.5 (lowest latency)</option>
+              <option value="eleven_turbo_v2_5">Turbo v2.5</option>
+              <option value="eleven_multilingual_v2">Multilingual v2 (best quality)</option>
+            </select>
+          </label>
         )}
 
         {ttsCloud && (
@@ -323,13 +477,13 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
                 })}
               </div>
             )}
-            {ttsCloud === 'cartesia' && !settings.cartesia.voice_id && (
-              <p className="text-xs text-amber-300">Pick a Cartesia voice: calls use the Windows voice until one is chosen.</p>
+            {(ttsCloud === 'cartesia' || ttsCloud === 'elevenlabs') && !settings[ttsCloud].voice_id && (
+              <p className="text-xs text-amber-300">Pick a {PROVIDER_NAME[ttsCloud]} voice{ttsCloud === 'cartesia' ? ': calls use the Windows voice until one is chosen.' : ' (otherwise the default voice from .env is used).'}</p>
             )}
           </div>
         )}
-        {settings.tts_provider === 'windows' && (
-          <p className="text-xs text-gray-500">The agent uses the voices installed in Windows (and the browser's own voices in test calls). Choose Deepgram or Cartesia for a natural live voice.</p>
+        {settings.tts_chosen === 'windows' && (
+          <p className="text-xs text-gray-500">The agent uses the voices installed in Windows (and the browser's own voices in test calls). Choose a live voice for natural speech.</p>
         )}
       </section>
 
@@ -340,23 +494,25 @@ export default function LiveVoiceSettings({ agentName, companyName }: { agentNam
             <i className="fa-solid fa-ear-listen text-xs text-gray-500"></i>Hearing callers (speech-to-text)
           </h4>
           <span className={`text-xs px-2 py-0.5 rounded-full ${sttFellBack ? 'bg-amber-500/15 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'}`}>
-            {sttFellBack ? `Using ${PROVIDER_NAME[settings.stt_active]} until ${PROVIDER_NAME[settings.stt_provider]} has a key`
+            {sttFellBack ? `Using ${PROVIDER_NAME[settings.stt_active]} until ${PROVIDER_NAME[settings.stt_chosen]} has a key`
               : `Active: ${PROVIDER_NAME[settings.stt_active]}`}
           </span>
         </div>
-        <Segmented options={STT_OPTIONS} value={settings.stt_provider} onChange={(v) => save({ stt_provider: v })} />
-        {settings.stt_provider === 'deepgram' && (
+        {mode === 'standard' && (
+          <Segmented options={STT_OPTIONS} value={settings.stt_provider} onChange={(v) => save({ stt_provider: v })} />
+        )}
+        {sttChosen === 'deepgram' && (
           <label className="block text-xs text-gray-400 max-w-xs">Model
-            <select value={settings.deepgram.stt_model} onChange={(e) => save({ deepgram: { stt_model: e.target.value } })}
-              className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 outline-none">
+            <select value={dg.stt_model} onChange={(e) => save({ deepgram: { stt_model: e.target.value } })} className={selectCls}>
               <option value="nova-3">Nova-3 (most accurate)</option>
               <option value="nova-2">Nova-2</option>
             </select>
           </label>
         )}
         <p className="text-xs text-gray-500 leading-relaxed">
-          On phone calls the PC still notices instantly when the caller starts and stops talking (for interruptions);
-          the chosen service then writes down what they said. If it can't be reached, the call carries on with the recogniser on this PC.
+          {mode === 'deepgram' && settings.agent_active
+            ? 'On phone calls Deepgram also notices when the caller talks over the agent and stops it straight away. If Deepgram can\'t be reached, the call carries on the Standard way.'
+            : 'On phone calls the PC still notices instantly when the caller starts and stops talking (for interruptions); the chosen service then writes down what they said. If it can\'t be reached, the call carries on with the recogniser on this PC.'}
         </p>
       </section>
     </div>

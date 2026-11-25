@@ -35,7 +35,7 @@ from loguru import logger
 from app.core import store
 from app.services import call_rules
 from app.services import telephony
-from app.services import call_intents, dnc
+from app.services import call_intents, deepgram_agent, dnc, follow_ups
 from app.services.sip_dialer import (AUDIT_DIR, RING_TIMEOUT, SipCallSession, SipError, SipPhone, _account,
                                       cancel_invite, dial_target, sip_phone, whisper_model)
 
@@ -362,6 +362,7 @@ class InboundCallSession(SipCallSession):
 
     DIRECTION = "inbound"
     hangup_requested = False
+    meeting_state: dict = None      # set per call in __init__
 
     def __init__(self, settings: dict, call, loop: asyncio.AbstractEventLoop, agent,
                  number: str = "", name: str = ""):
@@ -377,6 +378,7 @@ class InboundCallSession(SipCallSession):
         self.agent = agent
         self.inbound = telephony.inbound_settings(settings)
         self.conv_id = f"{'dialed' if self.DIRECTION == 'outbound' else 'inbound'}-{self.call_id[:12]}"
+        self.meeting_state = {}       # a meeting request waiting for its day and time
 
     def _greeting(self, cfg) -> str:
         return (self.inbound.get("greeting") or cfg.greeting or "Hello, how can I help you?").strip()
@@ -422,6 +424,69 @@ class InboundCallSession(SipCallSession):
     def _farewell(self, cfg) -> str:
         return (cfg.farewell or "Thank you for calling. Goodbye.").strip()
 
+    def _record_meeting(self, when: str, said: str) -> None:
+        """A meeting request: on the Follow-ups page for the team."""
+        follow_ups.add("meeting", "dial pad" if self.DIRECTION == "outbound" else "inbound call",
+                       phone=self.caller_number if self.caller_number != "unknown" else "",
+                       name=self.caller_name, when=when, said=said, ref=self.call_id)
+        self.audit.event("meeting_request", when=when, said=said)
+        _update_call(self.call_id, meeting_requested=when or "no time given")
+
+    def _record_decision(self, outcome: str, heard: str, callback_when: str = "") -> None:
+        """The other person has decided (see call_intents): keep the
+        outcome, and put the number on the Do Not Call list if they asked."""
+        self.outcome = outcome
+        self.outcome_said = heard
+        extra = {"callback_when": call_intents.callback_when(callback_when or heard)} if outcome == "callback" else {}
+        self.callback_when = extra.get("callback_when", "")
+        _update_call(self.call_id, outcome=outcome, outcome_said=heard, **extra)
+        self.audit.event("decision", outcome=outcome, heard=heard)
+        logger.info(f"{self.DIRECTION.title()} call {self.call_id[:8]}: {outcome} ({heard!r})")
+        if outcome == "do_not_call":
+            try:
+                dnc.add(self.caller_number, "dial pad" if self.DIRECTION == "outbound" else "inbound call",
+                        heard, self.call_id, self.caller_name)
+            except ValueError:
+                pass   # no caller number (anonymous)
+
+    def _agent_prompt(self, greeting: str) -> str:
+        """The Deepgram Voice Agent's instructions for this call."""
+        who = self.caller_name or "the other person"
+        if self.DIRECTION == "outbound":
+            situation = (f"You are phoning {who} (you placed this call). You have already opened with: "
+                         f"\"{greeting}\" Listen to their answer and carry on from there.")
+        else:
+            situation = f"{self.caller_name or 'A caller'} phoned the company; you answer as its receptionist."
+        return self.agent._build_system_prompt() + "\n\nTHIS CALL:\n" + situation
+
+    def _voice_agent(self, greeting: str, transcript: list, deadline: float, link=None) -> str:
+        """The conversation on the Deepgram Voice Agent (the Deepgram card):
+        "done", "dropped" or "unavailable" (see deepgram_agent.converse).
+        link: the connection opened while the phone rang."""
+        prompt = link.prompt if link is not None else self._agent_prompt(greeting)
+        turns = {"n": 0}
+
+        def decide(text: str):
+            turns["n"] += 1
+            return self._decision(text, turns["n"], greeting)
+
+        def on_outcome(outcome: str, heard: str, details: dict) -> None:
+            # The LLM's own "completed" / "end_call" is a normal goodbye, not a decision.
+            if details.get("by") != "guardrails" and outcome in ("completed", "end_call"):
+                return
+            self._record_decision(outcome, heard, details.get("callback_when") or "")
+
+        def lookup(question: str) -> str:
+            # Company details (address, contact, hours, services) first, as in chat.
+            hit = self.agent._company_fact(self.conv_id, question) or self.agent._kb_lookup(question)
+            return hit[0] if hit else ""
+
+        return deepgram_agent.converse(
+            self, prompt=prompt, greeting=greeting, transcript=transcript,
+            save=lambda: _update_call(self.call_id, transcript=transcript), user_role="caller",
+            decide=decide, on_outcome=on_outcome, lookup=lookup, deadline=deadline,
+            should_stop=lambda: self.hangup_requested, link=link, on_meeting=self._record_meeting)
+
     def _adapt(self, reply: str) -> str:
         """Hook: reword a reply for this kind of call (inbound: as is)."""
         return reply
@@ -451,7 +516,11 @@ class InboundCallSession(SipCallSession):
         _live[self.call_id] = self
         logger.info(f"{self.DIRECTION.title()}: call {'to' if outgoing else 'from'} {self.caller_number} {self.caller_name!r}")
         final = "failed"
+        link = None
         try:
+            # The Deepgram card: connect while the phone rings, so the
+            # greeting plays the moment the call is answered.
+            link = deepgram_agent.open_link(self, self._agent_prompt(greeting), greeting)
             whisper_model()
             if not self._connect():
                 final = "no_answer"
@@ -480,9 +549,21 @@ class InboundCallSession(SipCallSession):
                     transcript[-1]["interrupted"] = True
                 return barge
 
-            barge = turn(greeting)
+            # The Deepgram card: Deepgram hears, thinks and speaks; the
+            # Standard pipeline below only runs when it can't be reached.
+            how = (self._voice_agent(greeting, transcript, deadline, link)
+                   if link is not None or deepgram_agent.enabled() else "unavailable")
+            agent_done = how == "done"
+            if how == "dropped" and self._answered() and not self.hangup_requested:
+                # Carry on the Standard way, with what was said so far.
+                self.agent.conversation_history[self.conv_id] += [
+                    {"role": "assistant" if t["role"] == "agent" else "user", "content": t["text"]}
+                    for t in transcript[1:]]
+                barge = turn("Sorry, the line dropped for a moment. Could you say that again?")
+            else:
+                barge = None if agent_done else turn(greeting)
             silent, unclear, turn_no = 0, 0, 0
-            while self._answered() and not self.hangup_requested:
+            while not agent_done and self._answered() and not self.hangup_requested:
                 heard = self.listen(barge)
                 barge = None
                 if not self._answered() or self.hangup_requested:
@@ -507,17 +588,7 @@ class InboundCallSession(SipCallSession):
                 decided = self._decision(heard, turn_no, greeting)
                 if decided:
                     outcome, said = decided
-                    self.outcome = outcome
-                    extra = {"callback_when": call_intents.callback_when(heard)} if outcome == "callback" else {}
-                    _update_call(self.call_id, outcome=outcome, outcome_said=heard, **extra)
-                    self.audit.event("decision", outcome=outcome, heard=heard)
-                    logger.info(f"{self.DIRECTION.title()} call {self.call_id[:8]}: {outcome} ({heard!r})")
-                    if outcome == "do_not_call":
-                        try:
-                            dnc.add(self.caller_number, "dial pad" if self.DIRECTION == "outbound" else "inbound call",
-                                    heard, self.call_id, self.caller_name)
-                        except ValueError:
-                            pass   # no caller number (anonymous)
+                    self._record_decision(outcome, heard)
                     if said:
                         turn(said, end=True)
                     break
@@ -529,6 +600,15 @@ class InboundCallSession(SipCallSession):
                     break
                 if not self._answered() or self.hangup_requested:
                     break
+                # "Can you schedule a meeting with the recruiter?": ask when, pass it on.
+                meet = follow_ups.meeting_reply(self.meeting_state, heard, self._record_meeting)
+                if meet:
+                    if not meet.endswith("?"):
+                        meet += " Is there anything else I can help you with?"
+                    self.agent.conversation_history.setdefault(self.conv_id, []).extend(
+                        [{"role": "user", "content": heard}, {"role": "assistant", "content": meet}])
+                    barge = turn(meet)
+                    continue
                 reply = self._ask(heard) or "Sorry, could you say that again?"
                 if not self._answered() or self.hangup_requested:
                     break
@@ -544,6 +624,8 @@ class InboundCallSession(SipCallSession):
             self.audit.event("error", error=str(e))
             _update_call(self.call_id, error=str(e))
         finally:
+            if link is not None:
+                link.close()           # not answered, or the call is over
             _live.pop(self.call_id, None)
             if self._answered():
                 try:
@@ -577,9 +659,19 @@ class InboundCallSession(SipCallSession):
             elif final == "completed" and not self.we_hung_up and not self.ending and not self.hangup_requested:
                 final = "hung_up"          # the other person put the phone down mid-conversation
                 self.audit.event("hung_up", by="caller")
-            call_rules.after_call(self.caller_number, final, self.call_id, self.caller_name)
+            said = next((t.get("text", "") for t in reversed(transcript or []) if t.get("role") != "agent"), "")
+            call_rules.after_call(self.caller_number, final, self.call_id, self.caller_name, said,
+                                  "dial pad" if self.DIRECTION == "outbound" else "inbound call")
             _update_call(self.call_id, status=final, ended_at=_now(), transcript=transcript,
                          ended_by="agent" if self.we_hung_up else "caller")
+            if self.DIRECTION == "outbound":
+                # A callback request or an answering machine: dialled again later.
+                try:
+                    follow_ups.after_dialed_call(self.call_id, self.caller_number, self.caller_name, final,
+                                                 getattr(self, "callback_when", ""),
+                                                 getattr(self, "outcome_said", "") or said)
+                except Exception as e:
+                    logger.warning(f"Call {self.call_id[:8]}: follow-up not recorded: {e}")
             logger.info(f"{self.DIRECTION.title()}: call with {self.caller_number} ended ({final})")
 
     def request_hangup(self) -> None:

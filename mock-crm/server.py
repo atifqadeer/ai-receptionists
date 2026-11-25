@@ -178,7 +178,11 @@ def delete_applicant(request: Request, applicant_id: str):
 
 RESULTS = HERE / "data" / "call_results.json"
 _OUTCOME_STATUS = {"interested": "interested", "not_interested": "not_interested", "callback": "callback_requested",
-                   "do_not_call": "do_not_call", "no_response": "no_response"}
+                   "do_not_call": "do_not_call", "no_response": "no_response", "voicemail": "no_answer",
+                   "wrong_number": "wrong_number"}
+# When there is no outcome (the call was not answered or did not connect).
+_CALL_STATUS = {"no_answer": "no_answer", "busy": "no_answer", "failed": "call_failed", "hung_up": "hung_up",
+                "dropped": "call_failed", "dnc": "do_not_call", "callback": "callback_requested"}
 
 
 @app.post("/api/v1/call-results", status_code=201)
@@ -196,10 +200,15 @@ async def receive_call_result(request: Request):
         RESULTS.parent.mkdir(parents=True, exist_ok=True)
         RESULTS.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
         stored = _load()
-        found = next((a for a in stored if a["id"] == result.get("applicant_id")), None)
+        # The receptionist sends the id as "contact_id" (or under the name set
+        # in its "CRM id field" setting, e.g. "applicant_id").
+        ids = {result.get(k) for k in ("applicant_id", "contact_id", "id")} - {None, ""}
+        found = next((a for a in stored if a["id"] in ids), None)
         if found:
-            found["status"] = _OUTCOME_STATUS.get(result.get("outcome") or "", "contacted")
-            found["last_call"] = {k: result.get(k) for k in ("call_id", "status", "outcome", "notes_summary", "finished_at")}
+            found["status"] = (_OUTCOME_STATUS.get(result.get("outcome") or "")
+                               or _CALL_STATUS.get(result.get("status") or "") or "contacted")
+            found["last_call"] = {k: result.get(k) for k in ("call_id", "status", "outcome", "call_status", "will_retry",
+                                                             "next_attempt_at", "attempts", "notes_summary", "finished_at")}
             found["updated_at"] = _now()
             _save(stored)
     return {"received": True, "applicant_updated": bool(found)}
