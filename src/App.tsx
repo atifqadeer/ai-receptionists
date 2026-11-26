@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { widgetApi } from './utils/widgetApi';
 import Dashboard from './components/Dashboard';
 import RealCallSimulator from './components/RealCallSimulator';
 import OutboundCalls from './components/OutboundCalls';
@@ -15,12 +16,38 @@ import { AuthUser, signOut } from './utils/auth';
 
 type Page = 'dashboard' | 'webchat' | 'realcall' | 'jobcalls' | 'followups' | 'dnc' | 'notinterested' | 'hungup' | 'inbound' | 'analytics' | 'settings';
 
+// Green dot with a heartbeat ring: there are unread chat messages.
+function UnreadDot({ className = '' }: { className?: string }) {
+  return (
+    <span className={`relative flex h-2.5 w-2.5 ${className}`} aria-label="Unread chat messages">
+      <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping"></span>
+      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]"></span>
+    </span>
+  );
+}
+
 function App({ user }: { user: AuthUser }) {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [menuOpen, setMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+
+  // Unread website chat messages, for the pulsing dot on "Chat" in the menu.
+  const [chatUnread, setChatUnread] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const check = () => {
+      if (document.hidden) return;
+      widgetApi.visitors()
+        .then((r) => { if (alive) setChatUnread(r.visitors.reduce((a, v) => a + (v.unread || 0), 0)); })
+        .catch(() => { /* backend down: keep the last value */ });
+    };
+    check();
+    const t = window.setInterval(check, 5000);
+    document.addEventListener('visibilitychange', check);
+    return () => { alive = false; window.clearInterval(t); document.removeEventListener('visibilitychange', check); };
+  }, []);
 
   // "Download Database": the whole MySQL database as a compressed .sql.gz
   // file from one consistent snapshot (backend app/services/db_backup.py).
@@ -108,8 +135,17 @@ function App({ user }: { user: AuthUser }) {
                   : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
               }`}
             >
-              <i className={`fa-solid ${item.icon} w-5 text-center`}></i>
+              <span className="relative w-5 text-center">
+                <i className={`fa-solid ${item.icon}`}></i>
+                {item.id === 'webchat' && chatUnread > 0 && !sidebarOpen && <UnreadDot className="absolute -top-1 -right-1.5" />}
+              </span>
               {sidebarOpen && <span>{item.label}</span>}
+              {item.id === 'webchat' && chatUnread > 0 && sidebarOpen && (
+                <span className="ml-auto flex items-center gap-2" title={`${chatUnread} unread chat message${chatUnread === 1 ? '' : 's'}`}>
+                  <span className="text-[11px] font-semibold text-emerald-300">{chatUnread > 99 ? '99+' : chatUnread}</span>
+                  <UnreadDot />
+                </span>
+              )}
             </button>
           ))}
         </nav>

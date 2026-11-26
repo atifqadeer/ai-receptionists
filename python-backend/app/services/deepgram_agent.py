@@ -32,7 +32,7 @@ from typing import Callable, Optional
 
 from loguru import logger
 
-from app.services import voice
+from app.services import spoken_numbers, voice
 
 AGENT_URL = "wss://agent.deepgram.com/v1/agent/converse"
 CONNECT_TIMEOUT = 8.0       # seconds to connect and have the settings accepted
@@ -118,8 +118,12 @@ def settings_message(prompt: str, greeting: str, s: Optional[dict] = None) -> di
         think["provider"]["temperature"] = max(0.0, min(1.0, float(dg.get("agent_temperature") or 0.5)))
     except ValueError:
         pass
+    stt = dg.get("stt_model") or "nova-3"
+    listen = {"type": "deepgram", "model": stt}
+    if not stt.startswith("flux"):
+        listen["smart_format"] = True      # numbers as digits for the LLM and the transcript (not allowed with Flux)
     agent = {"language": (s.get("language") or "en")[:5],
-             "listen": {"provider": {"type": "deepgram", "model": dg.get("stt_model") or "nova-3"}},
+             "listen": {"provider": listen},
              "think": think,
              "speak": {"provider": {"type": "deepgram", "model": dg.get("tts_voice") or "aura-2-thalia-en"}}}
     if greeting:
@@ -393,6 +397,8 @@ def converse(session, *, prompt: str, greeting: str, transcript: list, save: Cal
                 return
             st["last_activity"] = time.time()
             role = "agent" if data.get("role") == "assistant" else user_role
+            if role != "agent":
+                text = spoken_numbers.digits(text)
             last = transcript[-1] if transcript else {}
             if role == "agent" and last == {"role": "agent", "text": text}:
                 return                  # the greeting, already written down

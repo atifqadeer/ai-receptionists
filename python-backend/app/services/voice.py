@@ -379,7 +379,8 @@ def transcribe(pcm16_8k: bytes, hint: str = "") -> Optional[dict]:
         with httpx.Client(timeout=TIMEOUT) as client:
             if provider == "deepgram":
                 model = s["deepgram"].get("stt_model") or "nova-3"
-                params = [("model", model), ("smart_format", "true"),
+                # numerals: spoken numbers as digits ("three oh eight" -> "3 0 8", joined later by spoken_numbers).
+                params = [("model", model), ("smart_format", "true"), ("numerals", "true"),
                           ("punctuate", "true"), ("language", s.get("language") or "en")]
                 # Words from the job (title, employer, place) the caller is likely to say.
                 terms = list(dict.fromkeys(w for w in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", hint or "")

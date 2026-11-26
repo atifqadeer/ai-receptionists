@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { API_BASE } from '../utils/agentApi';
 import { withToken } from '../utils/auth';
-import { STATUS_STYLE, statusLabel, outcomeLabel } from '../utils/callStatus';
+import { STATUS_STYLE, STATUS_LABEL, OUTCOME_LABEL, OUTCOME_STYLE, statusLabel, outcomeLabel } from '../utils/callStatus';
 
 // Analytics: real numbers from the backend (MySQL calls and chat tables),
 // see python-backend/app/services/analytics.py.
@@ -9,9 +9,13 @@ import { STATUS_STYLE, statusLabel, outcomeLabel } from '../utils/callStatus';
 type Period = '24h' | '7d' | '30d' | '90d' | 'all';
 interface Bucket { answered: number; missed: number }
 interface LogRow { at: string; kind: string; type: string; name: string; number: string; job: string; status: string; outcome: string; result: string; talk_seconds: number | null; attempts: number }
+interface Summary { calls: number; answered: number; answer_rate: number | null; talk_seconds: number; avg_talk_seconds: number | null; longest_talk_seconds: number | null; conversion: number | null }
 interface Report {
-  period: Period; timezone: string;
-  summary: { calls: number; answered: number; answer_rate: number | null; talk_seconds: number; avg_talk_seconds: number | null; longest_talk_seconds: number | null; conversion: number | null };
+  period: Period; timezone: string; generated_at: string;
+  summary: Summary;
+  previous: (Summary & { chats: number }) | null;
+  trend: (Bucket & { label: string; chats: number })[];
+  results: { result: string; count: number }[];
   hours: (Bucket & { hour: number })[];
   weekdays: (Bucket & { day: string })[];
   funnel: { imported: number; dialled: number; answered: number; interested: number; waiting: number; outcomes: { outcome: string; count: number }[] };
@@ -38,7 +42,23 @@ const dur = (s: number | null | undefined) => {
   return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
 };
 const total = (s: number) => (s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`);
-const resultLabel = (r: string) => (r === 'interested' ? outcomeLabel(r) : statusLabel(r || 'unknown'));
+const resultLabel = (r: string) => (r === 'interested' || (r in OUTCOME_LABEL && !(r in STATUS_LABEL)) ? outcomeLabel(r) : statusLabel(r || 'unknown'));
+const PREV_LABEL: Record<Period, string> = { '24h': 'previous 24h', '7d': 'previous 7 days', '30d': 'previous 30 days', '90d': 'previous 90 days', all: '' };
+
+// Change against the previous period: "+12%" / "-3 pts" with a direction colour.
+// `good` says which way is better (calls up is good; nothing is bad by default).
+function Delta({ now, before, unit = '%', good = 'up' }: { now: number | null; before: number | null | undefined; unit?: '%' | 'pts' | 's'; good?: 'up' | 'down' | 'none' }) {
+  if (now == null || before == null) return null;
+  let diff: number;
+  if (unit === '%') {
+    if (before === 0) return now > 0 ? <span className="text-[11px] text-emerald-400">new</span> : null;
+    diff = Math.round(((now - before) / before) * 100);
+  } else diff = Math.round(now - before);
+  if (diff === 0) return <span className="text-[11px] text-gray-500">no change</span>;
+  const better = good === 'none' ? null : (diff > 0) === (good === 'up');
+  const color = better == null ? 'text-gray-400' : better ? 'text-emerald-400' : 'text-rose-400';
+  return <span className={`text-[11px] ${color}`}><i className={`fa-solid fa-arrow-${diff > 0 ? 'up' : 'down'} mr-0.5 text-[9px]`}></i>{Math.abs(diff)}{unit === 'pts' ? ' pts' : unit}</span>;
+}
 
 function Card({ title, icon, children, className = '' }: { title: string; icon: string; children: React.ReactNode; className?: string }) {
   return (
@@ -114,20 +134,25 @@ export default function Analytics() {
   const [search, setSearch] = useState('');
   const [type, setType] = useState('all');
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const r = await fetch(`${API_BASE}/api/analytics?period=${period}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setData(await r.json());
       setError('');
     } catch {
-      setError(`Could not load analytics: the backend at ${API_BASE} is not reachable.`);
+      if (!silent) setError(`Could not load analytics: the backend at ${API_BASE} is not reachable.`);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [period]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { setData(null); load(); }, [load]);
+  // Keep the numbers current while the page is open (quietly, every minute).
+  useEffect(() => {
+    const t = window.setInterval(() => { if (!document.hidden) load(true); }, 60_000);
+    return () => window.clearInterval(t);
+  }, [load]);
 
   const log = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -138,6 +163,7 @@ export default function Analytics() {
   const s = data?.summary;
   const f = data?.funnel;
   const ch = data?.chats;
+  const p = data?.previous;
 
   return (
     <div className="space-y-6">
@@ -150,9 +176,14 @@ export default function Analytics() {
               {p.label}
             </button>
           ))}
-          <button onClick={load} disabled={loading} className="px-3 py-2 rounded-lg border border-gray-700 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50" title="Refresh">
+          <button onClick={() => load()} disabled={loading} className="px-3 py-2 rounded-lg border border-gray-700 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50" title="Refresh">
             <i className={`fa-solid fa-rotate ${loading ? 'fa-spin' : ''}`}></i>
           </button>
+          {data?.generated_at && (
+            <span className="self-center text-xs text-gray-500" title="Refreshes every minute while this page is open">
+              Updated {new Date(data.generated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
         </div>
         <a href={withToken(`${API_BASE}/api/analytics/calls.csv?period=${period}`)} download
           className="px-4 py-2 rounded-lg border border-gray-700 text-sm text-gray-300 hover:bg-gray-800 transition-all flex items-center gap-2">
@@ -167,19 +198,53 @@ export default function Analytics() {
         {/* Summary */}
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
-            { label: 'Calls', value: s.calls.toLocaleString() },
-            { label: 'Answered', value: s.answer_rate == null ? '—' : `${s.answer_rate}%`, note: `${s.answered} of ${s.calls}` },
-            { label: 'Total talk time', value: s.talk_seconds ? total(s.talk_seconds) : '—' },
-            { label: 'Avg talk time', value: dur(s.avg_talk_seconds), note: s.longest_talk_seconds ? `longest ${dur(s.longest_talk_seconds)}` : '' },
-            { label: 'Job-call conversion', value: s.conversion == null ? '—' : `${s.conversion}%`, note: 'interested ÷ answered job calls' },
-            { label: 'Website chats', value: ch.conversations.toLocaleString(), note: `${ch.visitor_messages} visitor messages` },
+            { label: 'Calls', value: s.calls.toLocaleString(), delta: <Delta now={s.calls} before={p?.calls} /> },
+            { label: 'Answered', value: s.answer_rate == null ? '—' : `${s.answer_rate}%`, note: `${s.answered} of ${s.calls}`, delta: <Delta now={s.answer_rate} before={p?.answer_rate} unit="pts" /> },
+            { label: 'Total talk time', value: s.talk_seconds ? total(s.talk_seconds) : '—', delta: <Delta now={s.talk_seconds} before={p?.talk_seconds} /> },
+            { label: 'Avg talk time', value: dur(s.avg_talk_seconds), note: s.longest_talk_seconds ? `longest ${dur(s.longest_talk_seconds)}` : '', delta: <Delta now={s.avg_talk_seconds} before={p?.avg_talk_seconds} unit="s" good="none" /> },
+            { label: 'Job-call conversion', value: s.conversion == null ? '—' : `${s.conversion}%`, note: 'interested ÷ answered job calls', delta: <Delta now={s.conversion} before={p?.conversion} unit="pts" /> },
+            { label: 'Website chats', value: ch.conversations.toLocaleString(), note: `${ch.visitor_messages} visitor messages`, delta: <Delta now={ch.conversations} before={p?.chats} /> },
           ].map((x) => (
             <div key={x.label} className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-              <p className="text-xs text-gray-400">{x.label}</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-gray-400">{x.label}</p>
+                {p && <span title={`vs the ${PREV_LABEL[data.period]}`}>{x.delta}</span>}
+              </div>
               <p className="text-xl font-bold text-white mt-1">{x.value}</p>
               {x.note && <p className="text-[11px] text-gray-500 mt-0.5 truncate" title={x.note}>{x.note}</p>}
             </div>
           ))}
+        </div>
+        {p && <p className="text-[11px] text-gray-500 -mt-3">Arrows compare with the {PREV_LABEL[data.period]}.</p>}
+
+        {/* Activity over time + how calls ended */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <Card title={data.period === '24h' ? 'Last 24 hours, by hour' : 'Calls over time'} icon="fa-chart-column" className="lg:col-span-2">
+            {s.calls === 0 && ch.conversations === 0 ? <p className="text-sm text-gray-500">No calls or chats in this period.</p> : (<>
+              <StackedBars data={data.trend.map((t) => ({ ...t, name: t.label }))}
+                label={(i) => { const step = Math.ceil(data.trend.length / 8); return i % step === 0 || i === data.trend.length - 1 ? data.trend[i].label : ''; }} />
+              <p className="text-xs text-gray-500 mt-3">
+                Website chats started: {data.trend.map((t) => t.chats).reduce((a, b) => a + b, 0)}
+                {(() => { const top = data.trend.reduce((a, b) => (b.answered + b.missed > a.answered + a.missed ? b : a), data.trend[0]);
+                  return top && top.answered + top.missed > 0 ? ` · busiest: ${top.label} (${top.answered + top.missed} calls)` : ''; })()}
+              </p>
+            </>)}
+          </Card>
+          <Card title="How calls ended" icon="fa-flag-checkered">
+            {data.results.length === 0 ? <p className="text-sm text-gray-500">No calls in this period.</p> : (
+              <div className="space-y-2.5">
+                {data.results.map((r) => (
+                  <div key={r.result} className="flex items-center gap-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${r.result === 'interested' ? 'bg-emerald-500/15 text-emerald-300' : STATUS_STYLE[r.result] || OUTCOME_STYLE[r.result] || 'bg-gray-700/60 text-gray-300'}`}>{resultLabel(r.result)}</span>
+                    <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${Math.max(2, (100 * r.count) / s.calls)}%`, background: ANSWERED }}></div>
+                    </div>
+                    <span className="text-xs text-gray-300 w-14 text-right">{r.count} <span className="text-gray-500">({Math.round((100 * r.count) / s.calls)}%)</span></span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
         </div>
 
         {/* When calls happen */}
@@ -256,7 +321,7 @@ export default function Analytics() {
                   { label: 'Gave an email', value: `${ch.with_email}` },
                   { label: 'Visitor messages', value: ch.visitor_messages },
                   { label: 'Messages per chat', value: ch.avg_messages ?? '—' },
-                  { label: 'Avg chat length', value: ch.avg_length_seconds == null ? '—' : total(ch.avg_length_seconds), note: 'first to last message' },
+                  { label: 'Typical chat length', value: ch.avg_length_seconds == null ? '—' : total(ch.avg_length_seconds), note: 'median, first to last message' },
                   { label: 'Operator joined', value: ch.operator_joined, note: 'chats a person from your team replied in' },
                   { label: 'AI reply time', value: ch.reply_ms == null ? '—' : `${(ch.reply_ms / 1000).toFixed(1)}s`, note: ch.reply_samples ? `${ch.reply_samples} timed replies` : 'no timed replies yet' },
                 ].map((x) => (

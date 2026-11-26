@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from loguru import logger
 
 from app.services import call_rules
-from app.services import dnc, inbound, not_interested, outbound, telephony
+from app.services import dnc, inbound, not_interested, outbound, spoken_numbers, telephony
 from app.services.knowledge import KnowledgeBase
 
 telephony_router = APIRouter()
@@ -400,7 +400,7 @@ async def voice_gather(request: Request, cid: str):
     if not call:
         return _voice_response(*telephony.say_and_hangup(s, "Goodbye."))
     fields = await _speech_and_status(request)
-    heard = (fields["speech"] or "").strip()
+    heard = spoken_numbers.digits((fields["speech"] or "").strip())
     if heard:
         call["transcript"] = call.get("transcript", []) + [{"role": "applicant", "text": heard}]
     conv = _conversation(request, call)

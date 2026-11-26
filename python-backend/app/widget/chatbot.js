@@ -72,6 +72,9 @@
       '.typing-who{font-size:11px;color:#6b7280;margin:0 0 3px 2px}' +
       '.mini{width:28px;height:28px;border-radius:50%;background:' + color + ';color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}.mini.op{background:#0f766e}.mini.hide{visibility:hidden}' +
       '.bubble{max-width:78%;padding:10px 13px;border-radius:16px;font-size:14px;line-height:1.45;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere}' +
+      '.bubble.fmt{white-space:normal}.bubble.fmt p{margin:0 0 6px}.bubble.fmt p:last-child{margin-bottom:0}.bubble.fmt .lh{font-weight:600;margin-bottom:4px}' +
+      '.bubble.fmt ul,.bubble.fmt ol{margin:0 0 6px;padding-left:18px}.bubble.fmt ul:last-child,.bubble.fmt ol:last-child{margin-bottom:0}.bubble.fmt li{margin:2px 0}' +
+      '.bubble.fmt ul li::marker{color:' + color + '}.bubble.fmt .more{font-size:12.5px;opacity:.7}' +
       '.them .bubble{background:#fff;color:#111827;border-bottom-left-radius:5px;box-shadow:0 1px 2px rgba(0,0,0,.07)}.me .bubble{background:' + color + ';color:#fff;border-bottom-right-radius:5px}' +
       '.who{font-size:11px;color:#6b7280;margin:0 0 3px 2px}.meta{font-size:10.5px;color:#9ca3af;margin:3px 4px 0}.me .meta{text-align:right}' +
       '.sys{align-self:center;font-size:12px;color:#6b7280;background:#eceef3;padding:5px 11px;border-radius:999px;text-align:center;max-width:90%}' +
@@ -364,6 +367,82 @@
     return Math.min(d.max || 2500, (d.base || 0) + (d.per_char || 0) * chars);
   }
 
+  // AI answers: show lists as bullets. The knowledge base writes one spoken
+  // style sentence ("Main Responsibilities: a, b, c and more.") so the same
+  // text works on calls; here it becomes a heading with bullets. Lines that
+  // start with "-", "•", "*" or "1." are bullets too. Same rules as the
+  // dashboard (src/utils/messageFormat.tsx). Built with textContent only.
+  var BULLET = /^\s*(?:[-•*▪●]|(\d+)[.)])\s+(.*)$/;
+  function nWords(s) { return s.replace(/^\s+|\s+$/g, '').split(/\s+/).length; }
+  function inlineList(sentence) {
+    var m = /^([^:]{2,60}):\s+(.+?)\.?$/.exec(sentence.replace(/^\s+|\s+$/g, ''));
+    if (!m || nWords(m[1]) > 6) return null;
+    var parts = m[2].split(/,\s+/), more = false, last = parts.pop(), i, items = [];
+    if (/\s+and more$/i.test(last)) { more = true; parts.push(last.replace(/\s+and more$/i, '')); }
+    else { i = last.lastIndexOf(' and '); if (i > 0) { parts.push(last.slice(0, i)); parts.push(last.slice(i + 5)); } else parts.push(last); }
+    for (i = 0; i < parts.length; i++) {
+      var x = parts[i].replace(/^\s*(?:and|or)\s+/i, '').replace(/[.;]\s*$/, '').replace(/^\s+|\s+$/g, '');
+      if (!x) continue;
+      if (nWords(x) > 14) return null;
+      items.push(x.charAt(0).toUpperCase() + x.slice(1));
+    }
+    if (items.length < 3) return null;
+    return { list: true, heading: m[1].replace(/^\s+|\s+$/g, ''), items: items, more: more, ordered: false };
+  }
+  function sentences(text) {
+    var out = [], start = 0, i, ch, rest;
+    for (i = 0; i < text.length; i++) {
+      ch = text.charAt(i);
+      if ((ch === '.' || ch === '!' || ch === '?') && /\s/.test(text.charAt(i + 1))) {
+        rest = text.slice(i + 1).replace(/^\s+/, '');
+        if (/^[A-Z"'(]/.test(rest) && !/\b(?:e\.g|i\.e|etc|Mr|Mrs|Ms|Dr|St|No)$/i.test(text.slice(start, i))) {
+          out.push(text.slice(start, i + 1).replace(/^\s+|\s+$/g, '')); start = i + 1;
+        }
+      }
+    }
+    if (text.slice(start).replace(/\s+/g, '')) out.push(text.slice(start).replace(/^\s+|\s+$/g, ''));
+    return out;
+  }
+  function parseMessage(text) {
+    var blocks = [], para = [], lines = text.split(/\r?\n/), k;
+    function flush() {
+      if (!para.length) return;
+      var prose = [], ss = sentences(para.join(' ')), j, l;
+      for (j = 0; j < ss.length; j++) {
+        l = inlineList(ss[j]);
+        if (l) { if (prose.length) blocks.push({ text: prose.join(' ') }); prose = []; blocks.push(l); } else prose.push(ss[j]);
+      }
+      if (prose.length) blocks.push({ text: prose.join(' ') });
+      para = [];
+    }
+    for (k = 0; k < lines.length; k++) {
+      var b = BULLET.exec(lines[k]), cur = blocks[blocks.length - 1];
+      if (b) {
+        if (!para.length && cur && cur.list && !cur.more) { cur.items.push(b[2]); continue; }
+        var heading = '';
+        if (para.length && /:\s*$/.test(para[para.length - 1])) heading = para.pop().replace(/:\s*$/, '');
+        flush();
+        blocks.push({ list: true, heading: heading, items: [b[2]], more: false, ordered: !!b[1] });
+      } else if (lines[k].replace(/\s+/g, '')) para.push(lines[k].replace(/^\s+|\s+$/g, ''));
+      else flush();
+    }
+    flush();
+    return blocks;
+  }
+  function fillFormatted(bubble, text) {
+    var blocks = parseMessage(text);
+    if (blocks.length === 1 && !blocks[0].list) { bubble.textContent = text; return; }
+    bubble.classList.add('fmt');
+    blocks.forEach(function (bl) {
+      if (!bl.list) { bubble.appendChild(el('p', null, bl.text)); return; }
+      if (bl.heading) bubble.appendChild(el('p', 'lh', bl.heading));
+      var ul = el(bl.ordered ? 'ol' : 'ul');
+      bl.items.forEach(function (it) { ul.appendChild(el('li', null, it)); });
+      bubble.appendChild(ul);
+      if (bl.more) bubble.appendChild(el('p', 'more', '…and more'));
+    });
+  }
+
   var lastSender = null;
   function addMessages(list) {
     list.forEach(function (m) {
@@ -381,7 +460,8 @@
         row.appendChild(mini);
         if (lastSender !== m.sender) col.appendChild(el('div', 'who', m.sender === 'operator' ? 'Team member' : cfg.agent_name));
       }
-      var b = el('div', 'bubble', m.text);
+      var b = el('div', 'bubble');
+      if (m.sender === 'agent') fillFormatted(b, m.text || ''); else b.textContent = m.text;
       col.appendChild(b);
       col.appendChild(el('div', 'meta', hhmm(m.at)));
       row.appendChild(col);

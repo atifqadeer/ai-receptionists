@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { widgetApi, WidgetSettings, WidgetVisitor, WidgetConversation } from '../utils/widgetApi';
 import CallSimulator from './CallSimulator';
+import { FormattedMessage } from '../utils/messageFormat';
 
 // Chat: everything about text chat in one place.
 // - Conversations: the website chat widget's visitors, listed by email. The
@@ -359,7 +360,7 @@ function Conversations({ onUnread, onSetup }: { onUnread: (n: number) => void; o
                           <div className={`px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
                             visitorMsg ? 'bg-gray-800 border border-gray-700/70 text-gray-100 rounded-bl-md'
                               : m.sender === 'operator' ? 'bg-teal-600 text-white rounded-br-md' : 'bg-violet-600/90 text-white rounded-br-md'}`}>
-                            {m.text}
+                            {m.sender === 'agent' ? <FormattedMessage text={m.text} bulletClass="bg-white/80" /> : m.text}
                           </div>
                           <span className="text-[11px] text-gray-500 mt-1 px-1">
                             {visitorMsg ? (visitor.name || 'Visitor') : m.sender === 'operator' ? 'You' : 'AI agent'} · {clock(m.at)}

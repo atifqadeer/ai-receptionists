@@ -3,6 +3,7 @@ import { useLocalStorage } from '../hooks/useLocalStorage';
 import { DEFAULT_IDENTITY, DEFAULT_BEHAVIOR, DEFAULT_KNOWLEDGE } from '../utils/agentDefaults';
 import { syncAgentSettings, startAgentChat, askAgent, endAgentCall } from '../utils/agentApi';
 import { widgetApi } from '../utils/widgetApi';
+import { FormattedMessage } from '../utils/messageFormat';
 import { chatApi, newChatId, Chat, ChatMessage, ChatSummary } from '../utils/chatApi';
 
 // Chat > Test chat: chat with the AI agent exactly as a website visitor
@@ -647,7 +648,7 @@ export default function CallSimulator() {
                       <div className={`px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words ${
                         agent ? 'bg-gray-800 border border-gray-700/70 text-gray-100 rounded-2xl rounded-bl-md'
                           : 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-2xl rounded-br-md shadow-md shadow-violet-900/30'}`}>
-                        {m.text}
+                        {agent ? <FormattedMessage text={m.text} /> : m.text}
                       </div>
                       <div className={`flex items-center gap-1.5 mt-1 px-1 text-[11px] text-gray-500 ${agent ? '' : 'flex-row-reverse'}`}>
                         <span>{clock(m.at)}</span>

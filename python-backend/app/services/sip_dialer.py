@@ -37,6 +37,7 @@ from typing import Callable, Optional
 
 from loguru import logger
 
+from app.services import spoken_numbers
 from app.services import voice as voice_engine
 from app.services.speakable import for_speech
 
@@ -1214,17 +1215,18 @@ class SipCallSession(threading.Thread):
             cloud, whisper = self._transcribe(clip)
         if cloud is not None:
             text = re.sub(r"\s+", " ", cloud["text"]).strip()
-            if not re.search(r"[a-z]", text.lower()):
+            if not re.search(r"[a-z0-9]", text.lower()):
                 result, self.unclear = ("", False) if not vosk_text else (vosk_text, True)
             else:
                 result, self.unclear = text, cloud["confidence"] < voice_engine.UNSURE
         elif whisper is not None:
             text = re.sub(r"\s+", " ", whisper["text"]).strip()
             nothing = whisper["no_speech"] > WHISPER_SILENCE and whisper["logprob"] < WHISPER_UNSURE
-            if nothing or not re.search(r"[a-z]", text.lower()):
+            if nothing or not re.search(r"[a-z0-9]", text.lower()):
                 result, self.unclear = ("", False) if not vosk_text else (vosk_text, True)
             else:
                 result, self.unclear = text, whisper["logprob"] < WHISPER_UNSURE
+        result = spoken_numbers.digits(result)   # "three oh eight" -> "308"
         self.audit.event("heard", text=result, vosk=vosk_text, whisper=whisper, cloud=cloud,
                          noise_floor=gate.floor, voice_threshold=round(gate.threshold()),
                          seconds=round(self.clock - start, 1), confidence=[round(c, 2) for c in confs],

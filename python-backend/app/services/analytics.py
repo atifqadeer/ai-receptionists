@@ -5,11 +5,14 @@ Analytics page: real numbers from MySQL, deeper than the dashboard.
   job-call funnel     imported -> dialled -> answered -> interested
   by call type        job calls, dial pad, inbound side by side
   chats               website conversations: length, messages, how they ended
+  trend               calls and chats per day (per hour for 24h)
+  vs previous period  the same numbers for the period before, for the deltas
   call log            every call in the period (also as CSV)
 """
 
 import csv
 import io
+import statistics
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -40,6 +43,74 @@ def _in(since: Optional[datetime], when: Optional[datetime]) -> bool:
     return bool(when) and (since is None or when >= since)
 
 
+def _summary(calls: list, interested: int, answered_jobs: int) -> dict:
+    answered = [c for c in calls if c["answered"]]
+    talk = [t for t in (_talk(c) for c in answered) if t is not None]
+    return {
+        "calls": len(calls),
+        "answered": len(answered),
+        "answer_rate": round(100 * len(answered) / len(calls)) if calls else None,
+        "talk_seconds": sum(talk),
+        "avg_talk_seconds": round(sum(talk) / len(talk)) if talk else None,
+        "longest_talk_seconds": max(talk) if talk else None,
+        "conversion": round(100 * interested / answered_jobs) if answered_jobs else None,
+    }
+
+
+def _trend(calls: list, chat_starts: list, since: Optional[datetime], tz, hourly: bool) -> list:
+    """Answered / not answered calls and chats per bucket: hours for 24h,
+    days otherwise (weeks when 'all' spans more than about three months)."""
+    now = datetime.now(tz)
+    if hourly:
+        start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=23)
+        step, fmt = timedelta(hours=1), "%H:00"
+    else:
+        first = since.astimezone(tz) if since else min(
+            [c["started"].astimezone(tz) for c in calls]
+            + [d.replace(tzinfo=timezone.utc).astimezone(tz) for d in chat_starts], default=now)
+        start = first.replace(hour=0, minute=0, second=0, microsecond=0)
+        step, fmt = timedelta(days=1), "%d %b"
+        if (now - start).days > 92:
+            start -= timedelta(days=start.weekday())
+            step, fmt = timedelta(days=7), "w/c %d %b"
+    n = int((now - start) / step) + 1
+    out = [{"label": (start + i * step).strftime(fmt), "answered": 0, "missed": 0, "chats": 0} for i in range(n)]
+
+    def idx(when: datetime) -> Optional[int]:
+        i = int((when.astimezone(tz) - start) / step)
+        return i if 0 <= i < n else None
+
+    for c in calls:
+        i = idx(c["started"])
+        if i is not None:
+            out[i]["answered" if c["answered"] else "missed"] += 1
+    for d in chat_starts:                    # stored as naive UTC
+        i = idx(d.replace(tzinfo=timezone.utc))
+        if i is not None:
+            out[i]["chats"] += 1
+    return out
+
+
+def _fill_names(calls: list) -> None:
+    """Dial-pad and inbound calls often carry only a number: use the name the
+    same number has on another call (a job applicant or a named caller)."""
+    names: dict = {}
+    for c in calls:
+        if c["name"] and c["number"]:
+            names.setdefault(c["number"], set()).add(c["name"].strip())
+    for c in calls:
+        known = names.get(c["number"]) or set()
+        if not c["name"] and len({n.lower() for n in known}) == 1:   # a shared number (test extension) stays blank
+            c["name"] = next(iter(known))
+
+
+def _chat_count(since: datetime, until: datetime) -> int:
+    with store.engine().connect() as c:
+        return int(c.execute(text(
+            "SELECT COUNT(*) FROM chat_conversations WHERE channel = 'website' AND started_at >= :a AND started_at < :b"),
+            {"a": since.replace(tzinfo=None), "b": until.replace(tzinfo=None)}).scalar() or 0)
+
+
 def _chats(since: Optional[datetime]) -> dict:
     where = "channel = 'website'" + (" AND started_at >= :since" if since else "")
     p = {"since": since.replace(tzinfo=None)} if since else {}
@@ -58,11 +129,13 @@ def _chats(since: Optional[datetime]) -> dict:
                if r["last_message_at"] and r["started_at"] and r["last_message_at"] > r["started_at"]]
     ended = Counter(("open" if r["status"] == "open" else (r["ended_by"] or "unknown")) for r in rows)
     return {
+        "started": [r["started_at"] for r in rows if r["started_at"]],
         "conversations": len(rows),
         "with_email": sum(1 for r in rows if (r["email"] or "").strip()),
         "visitor_messages": sum(int(r["visitor_message_count"] or 0) for r in rows),
         "avg_messages": round(sum(int(r["message_count"] or 0) for r in rows) / len(rows), 1) if rows else None,
-        "avg_length_seconds": round(sum(lengths) / len(lengths)) if lengths else None,
+        # Median: one chat left open for days would swamp an average.
+        "avg_length_seconds": round(statistics.median(lengths)) if lengths else None,
         "operator_joined": int(operator or 0),
         "reply_ms": round(float(avg_ms)) if avg_ms is not None else None,
         "reply_samples": int(n_ms or 0),
@@ -74,11 +147,10 @@ def report(period: str = "7d") -> dict:
     period = period if period in PERIODS else "7d"
     since = _since(period)
     tz = _tz()
-    calls = [c for c in _calls() if _in(since, c["started"])]
+    every = _calls()
+    _fill_names(every)
+    calls = [c for c in every if _in(since, c["started"])]
     calls.sort(key=lambda c: c["started"], reverse=True)
-
-    answered = [c for c in calls if c["answered"]]
-    talk = [t for t in (_talk(c) for c in answered) if t is not None]
 
     # When calls happen.
     hours = [{"hour": h, "answered": 0, "missed": 0} for h in range(24)]
@@ -90,7 +162,8 @@ def report(period: str = "7d") -> dict:
         days[local.weekday()][key] += 1
 
     # Job-call funnel: applicants imported in the period, how far they got.
-    jobs = [j for j in store.load_list("outbound_calls") if _in(since, _dt(j.get("created_at")))]
+    all_jobs = store.load_list("outbound_calls")
+    jobs = [j for j in all_jobs if _in(since, _dt(j.get("created_at")))]
     outcomes = Counter(j.get("outcome") or j.get("status") for j in jobs if j.get("answered_at"))
     funnel = {
         "imported": len(jobs),
@@ -124,19 +197,27 @@ def report(period: str = "7d") -> dict:
         "talk_seconds": _talk(c), "attempts": c["attempts"],
     } for c in calls]
 
+    chats = _chats(since)
+    chat_starts = chats.pop("started")
+
+    # The same numbers for the period before this one (deltas on the tiles).
+    previous = None
+    if since is not None:
+        before = since - PERIODS[period]
+        prev_calls = [c for c in every if before <= c["started"] < since]
+        prev_jobs = [j for j in all_jobs if (d := _dt(j.get("created_at"))) and before <= d < since]
+        previous = _summary(prev_calls, sum(1 for j in prev_jobs if j.get("outcome") == "interested"),
+                            sum(1 for j in prev_jobs if j.get("answered_at")))
+        previous["chats"] = _chat_count(before, since)
+
     return {
-        "period": period, "timezone": str(tz),
-        "summary": {
-            "calls": len(calls),
-            "answered": len(answered),
-            "answer_rate": round(100 * len(answered) / len(calls)) if calls else None,
-            "talk_seconds": sum(talk),
-            "avg_talk_seconds": round(sum(talk) / len(talk)) if talk else None,
-            "longest_talk_seconds": max(talk) if talk else None,
-            "conversion": round(100 * funnel["interested"] / funnel["answered"]) if funnel["answered"] else None,
-        },
+        "period": period, "timezone": str(tz), "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": _summary(calls, funnel["interested"], funnel["answered"]),
+        "previous": previous,
+        "trend": _trend(calls, chat_starts, since, tz, hourly=period == "24h"),
+        "results": [{"result": k, "count": v} for k, v in Counter(c["result"] or "unknown" for c in calls).most_common()],
         "hours": hours, "weekdays": days, "funnel": funnel, "by_kind": by_kind,
-        "chats": _chats(since), "log": log,
+        "chats": chats, "log": log,
     }
 
 

@@ -9,6 +9,7 @@ from xml.sax.saxutils import escape
 from typing import Optional, List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
 from loguru import logger
+from app.services import spoken_numbers
 
 from app.models.schemas import (
     AgentConfig, AgentResponse, CallContext, CallLog,
@@ -214,7 +215,7 @@ async def twilio_webhook(request: Request):
 async def twilio_gather(request: Request):
     """Handle gathered speech from Twilio"""
     form = await request.form()
-    speech_result = form.get("SpeechResult", "")
+    speech_result = spoken_numbers.digits(form.get("SpeechResult", ""))
     call_sid = form.get("CallSid", "")
     
     logger.info(f"Twilio gather: {speech_result}")
